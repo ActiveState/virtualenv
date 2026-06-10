@@ -1,9 +1,13 @@
 from __future__ import absolute_import, unicode_literals
 
 import os
-import shlex
 import sys
 from abc import ABCMeta, abstractmethod
+
+try:
+    from shlex import quote as shell_quote  # Python 3.3+
+except ImportError:  # Python 2
+    from pipes import quote as shell_quote
 
 from six import add_metaclass
 
@@ -30,7 +34,7 @@ class ViaTemplateActivator(Activator):
         :param string: the string to quote
         :return: quoted string that works in the activation script
         """
-        return shlex.quote(string)
+        return shell_quote(string)
 
     def generate(self, creator):
         dest_folder = creator.bin_dir
