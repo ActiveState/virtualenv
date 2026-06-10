@@ -35,11 +35,16 @@ def make_app_data(folder, **kwargs):
     if read_only:
         return ReadOnlyAppData(folder)
 
-    if not os.path.isdir(folder):
-        try:
-            os.makedirs(folder)
-            logging.debug("created app data folder %s", folder)
-        except OSError as exception:
+    # Create the folder atomically rather than checking-then-creating: a
+    # check-then-act here is a TOCTOU window an attacker can use to redirect
+    # the app data folder via a symlink (CVE-2026-22702).  Python 2 has no
+    # os.makedirs(exist_ok=...), so attempt the create unconditionally and
+    # tolerate the folder already existing (only a genuine failure is logged).
+    try:
+        os.makedirs(folder)
+        logging.debug("created app data folder %s", folder)
+    except OSError as exception:
+        if not os.path.isdir(folder):
             logging.info("could not create app data folder %s due to %r", folder, exception)
 
     if os.access(folder, os.W_OK):
