@@ -1,0 +1,5 @@
+Fix TOCTOU vulnerabilities in directory creation (CVE-2026-22702 /
+GHSA-597g-3phw-6986): the app data folder and lock directories are now
+created atomically instead of being checked-then-created, closing a race a
+local attacker could use to redirect those paths via a symlink. Backport of
+the upstream fix (PR pypa/virtualenv#3013) adapted for Python 2.

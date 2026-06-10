@@ -25,7 +25,7 @@ class PythonActivator(ViaTemplateActivator):
         win_py2 = creator.interpreter.platform == "win32" and creator.interpreter.version_info.major == 2
         replacements.update(
             {
-                "__LIB_FOLDERS__": ensure_text(os.pathsep.join(lib_folders.keys())),
+                "__LIB_FOLDERS__": ensure_text(lib_folders),
                 "__DECODE_PATH__": ("yes" if win_py2 else ""),
             },
         )

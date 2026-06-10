@@ -16,11 +16,13 @@ from virtualenv.util.path import Path
 class _CountedFileLock(FileLock):
     def __init__(self, lock_file):
         parent = os.path.dirname(lock_file)
-        if not os.path.isdir(parent):
-            try:
-                os.makedirs(parent)
-            except OSError:
-                pass
+        # Atomic create instead of check-then-act: the isdir/makedirs gap is a
+        # TOCTOU window for a symlink attack on the lock directory
+        # (CVE-2026-22702).  Tolerate the parent already existing.
+        try:
+            os.makedirs(parent)
+        except OSError:
+            pass
         super(_CountedFileLock, self).__init__(lock_file)
         self.count = 0
         self.thread_safe = RLock()

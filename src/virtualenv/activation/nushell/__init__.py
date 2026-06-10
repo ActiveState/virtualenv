@@ -29,7 +29,7 @@ class NushellActivator(ViaTemplateActivator):
             else:
                 current_sharps = 0
         wrapping = "#" * (max_sharps + 1)
-        return f"r{wrapping}'{string}'{wrapping}"
+        return "r{0}'{1}'{0}".format(wrapping, string)
 
     def replacements(self, creator, dest_folder):
         # Due to nushell scoping, it isn't easy to create a function that will

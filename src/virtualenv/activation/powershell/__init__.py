@@ -18,4 +18,4 @@ class PowerShellActivator(ViaTemplateActivator):
         [2]: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing#passing-arguments-that-contain-quote-characters
         """  # noqa: D205
         string = string.replace("'", "''")
-        return f"'{string}'"
+        return "'{0}'".format(string)
