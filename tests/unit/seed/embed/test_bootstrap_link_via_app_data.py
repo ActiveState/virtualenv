@@ -1,9 +1,11 @@
 from __future__ import absolute_import, unicode_literals
 
 import contextlib
+import hashlib
 import os
 import subprocess
 import sys
+from base64 import urlsafe_b64encode
 from stat import S_IWGRP, S_IWOTH, S_IWUSR
 from threading import Thread
 
@@ -242,3 +244,79 @@ def _run_parallel_threads(tmp_path):
     for thread in threads:
         thread.join()
     return exceptions
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("plain", id="plain"),
+        pytest.param("two words", id="space"),
+        pytest.param("owner's env", id="apostrophe"),
+        pytest.param("$(touch pwned) `touch pwned`", id="command-substitution"),
+        pytest.param("a" * 120, id="long", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX shebang limit")),
+        pytest.param("env \\path", id="backslash", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX filename")),
+        pytest.param("env\tname", id="tab", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX filename")),
+    ],
+)
+@pytest.mark.parametrize(
+    "via_python",
+    [
+        pytest.param(False, id="launcher"),
+        pytest.param(
+            True,
+            id="python",
+            marks=pytest.mark.skipif(os.name == "nt", reason="Windows launcher is an executable"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("seeder", [pytest.param("app-data", id="app-data"), pytest.param("pip", id="pip")])
+def test_console_script_preserves_interpreter_path(tmp_path, current_fastest, name, via_python, seeder):
+    work = tmp_path / "work"
+    work.mkdir()
+    destination = os.path.join(ensure_text(str(tmp_path)), name, "env")
+    cli_run(
+        [
+            destination,
+            "--seeder",
+            seeder,
+            "--creator",
+            current_fastest,
+            "--activators",
+            "",
+            "--no-periodic-update",
+            "--pip",
+            "embed",
+        ],
+    )
+    scripts = os.path.join(destination, "Scripts" if os.name == "nt" else "bin")
+    cmd = ([os.path.join(scripts, "python")] if via_python else []) + [
+        os.path.join(scripts, "pip.exe" if os.name == "nt" else "pip"),
+        "--version",
+    ]
+    process = Popen(cmd, cwd=ensure_text(str(work)), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = process.communicate()
+    assert process.returncode == 0, err
+    assert os.path.normcase(destination) in os.path.normcase(out.decode("utf-8"))
+    assert list(work.iterdir()) == []  # nothing in the destination path was executed by the shell
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell launchers")
+@pytest.mark.parametrize(
+    ("name", "via_shell"),
+    [
+        pytest.param("plain", False, id="plain"),
+        pytest.param("two words", True, id="space"),
+        pytest.param("env\tname", True, id="tab"),
+    ],
+)
+def test_pip_launcher_record_matches_contents(tmp_path, name, via_shell):
+    session = cli_run([ensure_text(str(tmp_path / name)), "--seeder", "pip", "--pip", "embed", "--no-periodic-update"])
+    record = next(session.creator.purelib.glob("pip-*.dist-info/RECORD"))
+    with open(str(record), "rb") as file_handler:
+        rows = [line.split(b",") for line in file_handler.read().splitlines()]
+    row = next(row for row in rows if row[0].endswith(b"/bin/pip"))
+    with open(str(session.creator.script_dir / "pip"), "rb") as file_handler:
+        content = file_handler.read()
+    assert content.startswith(b"#!/bin/sh\n") is via_shell
+    digest = urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=")
+    assert row[1:] == [b"sha256=" + digest, str(len(content)).encode("ascii")]

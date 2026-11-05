@@ -10,6 +10,7 @@ from tempfile import mkdtemp
 
 from distlib.scripts import ScriptMaker, enquote_executable
 from six import PY3, add_metaclass
+from six.moves import shlex_quote
 
 from virtualenv.util import ConfigParser
 from virtualenv.util.path import Path, safe_delete
@@ -194,6 +195,15 @@ class ScriptMakerCustom(ScriptMaker):
         self.version_info = version_info.major, version_info.minor
         self.variants = {"", "X", "X.Y"}
         self._name = name
+        self._raw_executable = ensure_text(str(executable))
+
+    def _build_shebang(self, executable, post_interp):
+        shebang = super(ScriptMakerCustom, self)._build_shebang(executable, post_interp)
+        if os.name != "posix" or len(shebang.split()) == 1:
+            return shebang
+        # distlib only double quotes the interpreter path for the /bin/sh launcher, so the shell would still expand
+        # $(...), backticks and $VAR from the destination path; it also misses tabs when choosing that launcher
+        return shell_shebang(self._raw_executable, post_interp)
 
     def _write_script(self, names, shebang, script_bytes, filenames, ext):
         names.add("{}{}.{}".format(self._name, *self.version_info))
@@ -202,3 +212,9 @@ class ScriptMakerCustom(ScriptMaker):
             if path.is_symlink():
                 path.unlink()
         super(ScriptMakerCustom, self)._write_script(names, shebang, script_bytes, filenames, ext)
+
+
+def shell_shebang(executable, post_interp=b""):
+    # The exec line is read by both sh and Python; double-quoted backslashes survive both readers.
+    quoted = shlex_quote(ensure_text(executable)).replace("\\", "'\"\\\\\"'")
+    return b"#!/bin/sh\n'''exec' " + quoted.encode("utf-8") + post_interp + b' "$0" "$@"\n' + b"' '''\n"
