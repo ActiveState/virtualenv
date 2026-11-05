@@ -488,3 +488,42 @@ def test_seed_image_build_replaces_leftovers(tmp_path, leftover, files, kept):
     args += ["--no-setuptools", "--no-wheel", "--pip", "embed"]
     purelib = cli_run(args, setup_logging=False).creator.purelib
     assert (path.exists(), (next(purelib.glob("pip-*.dist-info")) / "RECORD").is_file()) == (kept, True)
+
+
+@pytest.fixture
+def unusable_cache(tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.write_text("")
+    return blocked / "cache"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("environment", id="environment"),
+        pytest.param("configuration", id="configuration"),
+        pytest.param("command-line", id="command-line"),
+    ],
+)
+def test_transient_seed_survives_cache_cleanup(tmp_path, source, unusable_cache):
+    """GHSA-4f8h-vr72-p32c: seeding from temporary app-data must copy, never link into the removed folder."""
+    config = tmp_path / "virtualenv.ini"
+    config.write_text("[virtualenv]\nsymlink_app_data = true\n" if source == "configuration" else "")
+    env = os.environ.copy()
+    env[str("VIRTUALENV_CONFIG_FILE")] = str(config)
+    env[str("VIRTUALENV_OVERRIDE_APP_DATA")] = str(unusable_cache)
+    if source == "environment":
+        env[str("VIRTUALENV_SYMLINK_APP_DATA")] = str("true")
+    dest = os.path.join(ensure_text(str(tmp_path)), "env")
+    args = [dest, "--no-periodic-update", "--no-setuptools", "--no-wheel"]
+    if source == "command-line":
+        args.append("--symlink-app-data")
+    subprocess.check_call([sys.executable, "-m", "virtualenv"] + args, env=env)
+    site_packages = [
+        os.path.join(root, "pip") for root, dirs, _ in os.walk(dest) if root.endswith("site-packages") and "pip" in dirs
+    ]
+    assert len(site_packages) == 1
+    pip_dir = site_packages[0]
+    assert (os.path.islink(pip_dir), os.path.isfile(os.path.join(pip_dir, "__init__.py"))) == (False, True)
+    out = subprocess.check_output([os.path.join(dest, "bin", "python"), "-m", "pip", "--version"])
+    assert b"pip " in out

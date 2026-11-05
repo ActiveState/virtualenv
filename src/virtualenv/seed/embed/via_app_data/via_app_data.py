@@ -20,7 +20,12 @@ from .pip_install.symlink import SymlinkPipInstall
 class FromAppData(BaseEmbed):
     def __init__(self, options):
         super(FromAppData, self).__init__(options)
-        self.symlinks = options.symlink_app_data
+        # temporary app-data is removed once the environment is created, so links into it would dangle (and point at a
+        # path someone else could recreate); the --symlink-app-data parser guard does not see the environment variable
+        # or configuration file forms of the option
+        self.symlinks = options.symlink_app_data and not self.app_data.transient
+        if options.symlink_app_data and self.app_data.transient:
+            logging.debug("copy seed packages because temporary app-data is removed after creation")
 
     @classmethod
     def add_parser_arguments(cls, parser, interpreter, app_data):
