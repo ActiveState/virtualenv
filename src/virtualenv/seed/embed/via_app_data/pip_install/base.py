@@ -46,6 +46,37 @@ class PipInstall(object):
         logging.debug("generated console scripts %s", " ".join(i.name for i in consoles))
 
     def build_image(self):
+        """
+        Extract the seed wheel into a staging directory, fix up its RECORD file, then move it into place.
+
+        Later runs reuse any image directory they find, so it only appears once the image is complete: a build that
+        fails part way (a full disk, a path that is too long) removes its staging directory, and the next build removes
+        one that a killed process left behind.
+        """
+        image_dir = self._image_dir
+        # beside the installer folder the staging path is exactly as long as the image path, so the Windows path length
+        # limits hit the build the same way they would hit the image
+        staging = image_dir.parent.with_name("{}-{}".format(image_dir.parent.name, image_dir.name))
+        if staging.exists():
+            safe_delete(staging)
+        if not image_dir.parent.exists():
+            image_dir.parent.mkdir(parents=True)
+        staging.mkdir()
+        self._image_dir = staging
+        try:
+            self._populate_image()
+            # keep the short path Windows may have switched the staging directory to, the install reads through it
+            built = self._image_dir.parent / image_dir.parent.name / image_dir.name
+            if built.exists() and not any(True for _ in built.iterdir()):
+                built.rmdir()  # an empty image directory counts as missing, but blocks the rename on Windows
+            os.rename(str(self._image_dir), str(built))
+        except BaseException:
+            safe_delete(self._image_dir)  # the staging directory, through the short path if Windows switched to it
+            raise
+        self._image_dir = built
+        self.__dist_info = None  # it pointed into the staging directory
+
+    def _populate_image(self):
         # 1. first extract the wheel
         logging.debug("build install image for %s to %s", self._wheel.name, self._image_dir)
         with zipfile.ZipFile(str(self._wheel)) as zip_ref:
@@ -197,7 +228,7 @@ class PipInstall(object):
             safe_delete(self._image_dir)
 
     def has_image(self):
-        return self._image_dir.exists() and next(self._image_dir.iterdir()) is not None
+        return self._image_dir.exists() and next(self._image_dir.iterdir(), None) is not None
 
 
 class ScriptMakerCustom(ScriptMaker):

@@ -400,3 +400,91 @@ def test_seed_metadata_keeps_reseeding_supported(tmp_path, linked, caplog):
         linked,
         False,
     )
+
+
+_DISK_FULL = OSError(28, "No space left on device")
+
+
+def _fail_during_extraction(zip_ref, path=None, members=None, pwd=None):
+    # stop short of the last entries, where the wheel keeps its dist-info files
+    for info in zip_ref.infolist()[:-5]:
+        zip_ref.extract(info, path)
+    raise _DISK_FULL
+
+
+@pytest.mark.parametrize(
+    "target, failure, linked",
+    [
+        pytest.param("zipfile.ZipFile.extractall", _fail_during_extraction, False, id="copy-extract"),
+        pytest.param(
+            "virtualenv.seed.embed.via_app_data.pip_install.copy.CopyPipInstall._generate_new_files",
+            _DISK_FULL,
+            False,
+            id="copy-finish",
+        ),
+        pytest.param(
+            "zipfile.ZipFile.extractall",
+            _fail_during_extraction,
+            True,
+            id="symlink-extract",
+            marks=pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable"),
+        ),
+        pytest.param(
+            "virtualenv.seed.embed.via_app_data.pip_install.symlink.set_tree",
+            _DISK_FULL,
+            True,
+            id="symlink-read-only",
+            marks=pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable"),
+        ),
+    ],
+)
+def test_seed_image_build_failure_leaves_no_partial_image(tmp_path, mocker, target, failure, linked):
+    """A failed image build must not leave a partial image that later runs would reuse (upstream #3487)."""
+    cache = tmp_path / "cache"
+    args = [
+        ensure_text(str(tmp_path / "env")),
+        "--app-data",
+        ensure_text(str(cache)),
+        "--no-periodic-update",
+        "--no-setuptools",
+        "--no-wheel",
+    ]
+    if linked:
+        args.append("--symlink-app-data")
+    kwargs = {"autospec": True} if callable(failure) else {}
+    with mocker.mock_module.patch(target, side_effect=failure, **kwargs):
+        with pytest.raises(Exception, match="No space left on device"):
+            cli_run(args, setup_logging=False)
+    installer = "SymlinkPipInstall" if linked else "CopyPipInstall"
+    images = next(cache.glob("wheel/*/image/1"))
+    left = sorted(i.name for i in list(images.iterdir()) + list((images / installer).iterdir()) if i.is_dir())
+    purelib = cli_run(args, setup_logging=False).creator.purelib
+    dist_info = next(purelib.glob("pip-*.dist-info"))
+    result = (
+        left,
+        (dist_info / "INSTALLER").is_file(),
+        (dist_info / "RECORD").is_file(),
+        (purelib / "{}.virtualenv".format(dist_info.stem)).is_file(),
+    )
+    assert result == ([installer], True, True, True)
+
+
+@pytest.mark.parametrize(
+    "leftover, files, kept",
+    [
+        pytest.param("CopyPipInstall-{}", ("pip.py",), False, id="killed-build"),
+        pytest.param("CopyPipInstall/{}", (), True, id="empty-image"),
+    ],
+)
+def test_seed_image_build_replaces_leftovers(tmp_path, leftover, files, kept):
+    cache = tmp_path / "cache"
+    version = PythonInfo.current_system().version_release_str
+    wheel_stem = os.path.splitext(BUNDLE_SUPPORT[version]["pip"])[0]
+    path = cache / "wheel" / version / "image" / "1" / leftover.format(wheel_stem)
+    path.mkdir(parents=True)
+    for name in files:
+        (path / name).write_text("")
+    args = [ensure_text(str(tmp_path / "env")), "--app-data", ensure_text(str(cache)), "--no-periodic-update"]
+    args += ["--no-setuptools", "--no-wheel", "--pip", "embed"]
+    purelib = cli_run(args, setup_logging=False).creator.purelib
+    assert (path.exists(), (next(purelib.glob("pip-*.dist-info")) / "RECORD").is_file()) == (kept, True)
