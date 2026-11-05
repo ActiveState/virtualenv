@@ -101,9 +101,12 @@ class PipInvoke(BaseEmbed):
             ":all:",
             "--disable-pip-version-check",
             "--no-index",
+            "--no-deps",
         ]
         # Only the selected (and, when downloaded, verified) archives may participate in pip's filename-based
-        # selection: never let pip consult an index or a shared folder holding other candidates.
+        # selection: never let pip consult an index or a shared folder holding other candidates. --no-deps matches the
+        # app-data seeder, which never installs dependencies either: a newer downloaded wheel (e.g. wheel>=0.46, which
+        # requires packaging) must not make pip go looking for unverified archives it was not given.
         folder = mkdtemp(prefix="virtualenv-seed-")
         try:
             cmd.extend(["--find-links", folder])

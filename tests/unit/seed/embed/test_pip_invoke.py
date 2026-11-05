@@ -42,6 +42,7 @@ def test_base_bootstrap_via_pip_invoke(tmp_path, coverage_env, mocker, current_f
                 expected.add(new[distribution])
         # pip must never consult an index, only a private folder holding exactly the selected wheels
         assert "--no-index" in cmd
+        assert "--no-deps" in cmd
         assert cmd.count("--find-links") == 1
         folder = Path(cmd[cmd.index("--find-links") + 1])
         assert folder not in (BUNDLE_FOLDER, extra_search_dir)
@@ -110,6 +111,7 @@ def test_pip_invoke_installs_only_selected_wheels(tmp_path, mocker):
         folder = cmd[cmd.index("--find-links") + 1]
         assert sorted(os.listdir(folder)) == sorted(i.name for i in selected.values())
         assert "--no-index" in cmd
+        assert "--no-deps" in cmd
         assert cmd.count("--find-links") == 1
         assert sorted(cmd[-len(selected) :]) == sorted("{}=={}".format(d, w.version) for d, w in selected.items())
     assert not os.path.exists(folder)
