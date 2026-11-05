@@ -2,13 +2,13 @@ from __future__ import absolute_import, unicode_literals
 
 import os
 import subprocess
+import sys
 from distutils.spawn import find_executable
 
 import pytest
 
 from virtualenv.activation import FishActivator
 from virtualenv.info import IS_WIN
-from virtualenv.run import cli_run
 from virtualenv.util.six import ensure_text
 
 
@@ -44,12 +44,15 @@ def test_fish(activation_tester_class, activation_tester, monkeypatch, tmp_path)
 )
 def test_fish_activate_does_not_run_commands(tmp_path, current_fastest, prompt, env_name):
     """GHSA-c947-3pg5-gm8q (backslash before quote) and GHSA-p58f-9548-mpm2 (commands embedded in paths)."""
-    dest = tmp_path / env_name
-    args = [ensure_text(str(dest)), "--without-pip", "--creator", current_fastest, "--no-periodic-update"]
+    # build the destination as a plain string: tests/unit/create/.../testing/path.py sets a "\\" altsep on the shared
+    # POSIX path flavour at import time, which would turn the backslashes of these names into separators in Path objects
+    dest = os.path.join(ensure_text(str(tmp_path)), env_name)
+    args = [dest, "--without-pip", "--creator", current_fastest, "--no-periodic-update"]
     args += ["--activators", "fish"]
     if prompt is not None:
         args += ["--prompt", prompt]
-    cli_run(args)
+    # create in a fresh interpreter for the same reason
+    subprocess.check_call([sys.executable, "-m", "virtualenv"] + args)
     work_dir = tmp_path / "workdir"
     work_dir.mkdir()
     (tmp_path / "home").mkdir()
@@ -57,7 +60,7 @@ def test_fish_activate_does_not_run_commands(tmp_path, current_fastest, prompt, 
     env[str("HOME")] = str(tmp_path / "home")
     # the path is passed through the environment so the driver cannot expand a payload dir name while locating the
     # script (fish before 3.1 does not set $argv for -c)
-    env[str("_ACTIVATE_UNDER_TEST")] = str(dest / "bin" / "activate.fish")
+    env[str("_ACTIVATE_UNDER_TEST")] = str(os.path.join(dest, "bin", "activate.fish"))
 
     script = 'source "$_ACTIVATE_UNDER_TEST"; printf "%s|" "$VIRTUAL_ENV"; fish_prompt'
     cmd = [find_executable("fish"), "-c", script]
@@ -72,5 +75,5 @@ def test_fish_activate_does_not_run_commands(tmp_path, current_fastest, prompt, 
     out, err = out.decode("utf-8"), err.decode("utf-8")
 
     assert not (work_dir / "PWNED").exists(), err
-    assert out.startswith("{}|".format(ensure_text(str(dest)))), (out, err)
+    assert out.startswith("{}|".format(dest)), (out, err)
     assert "({}) ".format(prompt if prompt is not None else env_name) in out, (out, err)

@@ -2,13 +2,13 @@ from __future__ import absolute_import, unicode_literals
 
 import os
 import subprocess
+import sys
 from distutils.spawn import find_executable
 
 import pytest
 
 from virtualenv.activation import BashActivator
 from virtualenv.info import IS_WIN
-from virtualenv.run import cli_run
 from virtualenv.util.six import ensure_text
 
 
@@ -34,11 +34,14 @@ def _run(cmd, cwd=None, env=None, stdin=None):
 
 
 def _create(dest, prompt, current_fastest):
-    args = [ensure_text(str(dest)), "--without-pip", "--creator", current_fastest, "--no-periodic-update"]
+    args = [dest, "--without-pip", "--creator", current_fastest, "--no-periodic-update"]
     args += ["--activators", "bash"]
     if prompt is not None:
         args += ["--prompt", prompt]
-    return cli_run(args)
+    # create in a fresh interpreter: tests/unit/create/.../testing/path.py sets a "\\" altsep on the shared POSIX path
+    # flavour at import time, which would turn the backslashes of some directory names here into separators in-process
+    subprocess.check_call([sys.executable, "-m", "virtualenv"] + args)
+    return os.path.join(dest, "Scripts" if IS_WIN else "bin")
 
 
 @pytest.mark.skipif(IS_WIN, reason="Github Actions ships with WSL bash")
@@ -72,8 +75,9 @@ def prompt_after_activate(request, tmp_path, current_fastest):
         pytest.skip("${PS1@P} needs bash 4.4 or later")
 
     def build(prompt, env_name, extra_env=None):
-        dest = tmp_path / env_name
-        _create(dest, prompt, current_fastest)
+        # a plain string path: tests/unit/create/.../testing/path.py sets a "\\" altsep on the shared POSIX path
+        # flavour at import time, which would turn backslashes in env_name into separators in Path objects
+        bin_dir = _create(os.path.join(ensure_text(str(tmp_path)), env_name), prompt, current_fastest)
         work_dir = tmp_path / "workdir"
         if not work_dir.exists():
             work_dir.mkdir()
@@ -88,7 +92,7 @@ def prompt_after_activate(request, tmp_path, current_fastest):
         env.pop(str("PS1"), None)
         env.pop(str("VIRTUAL_ENV_DISABLE_PROMPT"), None)
         env.update(extra_env or {})
-        cmd = render + [shell, ensure_text(str(dest / "bin" / "activate"))]
+        cmd = render + [shell, os.path.join(bin_dir, "activate")]
         _, out, _ = _run(cmd, cwd=ensure_text(str(work_dir)), env=env)
         return work_dir, out
 
@@ -152,8 +156,8 @@ def test_prompt_renders_name_literally(prompt_after_activate, prompt, compatibil
 )
 def test_bash_prompt_options(tmp_path, current_fastest, before, after, expected):
     """GHSA-6w3r-xr62-4xcp: the prompt stays literal whichever prompt options the user's bash has."""
-    session = _create(tmp_path / "env", "x$(touch PWNED)y", current_fastest)
-    activate = BashActivator.quote(ensure_text(str(session.creator.bin_dir / "activate")))
+    bin_dir = _create(os.path.join(ensure_text(str(tmp_path)), "env"), "x$(touch PWNED)y", current_fastest)
+    activate = BashActivator.quote(os.path.join(bin_dir, "activate"))
     script = "{}\nPS1=__END__\n. {}\n{}\nexit\n".format(before, activate, after)
     env = os.environ.copy()
     env.pop(str("VIRTUAL_ENV_DISABLE_PROMPT"), None)
@@ -165,14 +169,14 @@ def test_bash_prompt_options(tmp_path, current_fastest, before, after, expected)
 
 @pytest.mark.skipif(IS_WIN or find_executable("dash") is None, reason="needs dash as a POSIX shell")
 def test_bash_activate_sources_under_dash(tmp_path, current_fastest):
-    session = _create(tmp_path / "env", None, current_fastest)
-    dest = session.creator.dest
+    dest = os.path.join(ensure_text(str(tmp_path)), "env")
+    bin_dir = _create(dest, None, current_fastest)
     cmd = [
         "dash",
         "-c",
         'PS1="base "; . "$1" && printf "%s|%s|%s" "$VIRTUAL_ENV" "$PS1" "$VIRTUAL_ENV_PROMPT"',
         "dash",
-        ensure_text(str(dest / "bin" / "activate")),
+        os.path.join(bin_dir, "activate"),
     ]
     code, out, err = _run(cmd)
-    assert (code, out) == (0, "{}|base |env".format(ensure_text(str(dest)))), err
+    assert (code, out) == (0, "{}|base |env".format(dest)), err
