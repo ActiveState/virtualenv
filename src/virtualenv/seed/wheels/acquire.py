@@ -10,8 +10,20 @@ from virtualenv.util.six import ensure_str
 from virtualenv.util.subprocess import Popen, subprocess
 
 from .bundle import from_bundle
-from .periodic_update import add_wheel_to_update_log
+from .periodic_update import UnverifiedWheelError, add_wheel_to_update_log, verify_wheel_digest
 from .util import Version, Wheel, discover_wheels
+
+# A private index can legitimately serve a rebuilt wheel under the same distribution, version, and filename PyPI also
+# uses - an internal mirror re-signing or re-packaging a release for policy reasons, for example. Verifying that file
+# against PyPI's own digest would then reject a wheel that came from exactly the source it was configured to come from,
+# not a compromised one. This does not attempt to find every way pip can be pointed elsewhere (a pip.conf file has the
+# same effect and is invisible here), only the common, explicit one, so treat this as a conservative signal rather than
+# proof either way: it exists to avoid false rejections, not to guarantee verification runs whenever it safely could.
+_CUSTOM_INDEX_ENV_VARS = ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_INDEX")
+
+
+def _uses_default_index(env):
+    return not any(env.get(str(var)) for var in _CUSTOM_INDEX_ENV_VARS)
 
 
 def get_wheel(distribution, version, for_py_version, search_dirs, download, app_data, do_periodic_update, env):
@@ -27,15 +39,22 @@ def get_wheel(distribution, version, for_py_version, search_dirs, download, app_
 
     if download and wheel is None and version != Version.embed:
         # 2. download from the internet
-        wheel = download_wheel(
-            distribution=distribution,
-            version_spec=Version.as_version_spec(version),
-            for_py_version=for_py_version,
-            search_dirs=search_dirs,
-            app_data=app_data,
-            to_folder=app_data.house,
-            env=env,
-        )
+        try:
+            wheel = download_wheel(
+                distribution=distribution,
+                version_spec=Version.as_version_spec(version),
+                for_py_version=for_py_version,
+                search_dirs=search_dirs,
+                app_data=app_data,
+                to_folder=app_data.house,
+                env=env,
+            )
+        except UnverifiedWheelError as exception:
+            # only the bundle request has a local wheel that satisfies it; a pinned version must fail
+            if version != Version.bundle:
+                raise
+            logging.warning("%s, seeding the bundled %s instead", exception, distribution)
+            return from_bundle(distribution, version, for_py_version, search_dirs, app_data, do_periodic_update, env)
         if wheel is not None and app_data.can_update:
             add_wheel_to_update_log(wheel, for_py_version, app_data)
 
@@ -61,6 +80,7 @@ def download_wheel(distribution, version_spec, for_py_version, search_dirs, app_
         str(to_folder),
         to_download,
     ]
+    verify_against_pypi = _uses_default_index(env)
     # pip has no interface in python - must be a new sub-process
     env = pip_wheel_env_run(search_dirs, app_data, env)
     process = Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
@@ -73,7 +93,11 @@ def download_wheel(distribution, version_spec, for_py_version, search_dirs, app_
             kwargs["stderr"] = err
         raise subprocess.CalledProcessError(process.returncode, cmd, **kwargs)
     result = _find_downloaded_wheel(distribution, version_spec, for_py_version, to_folder, out)
+    if result is None:
+        raise RuntimeError("could not find downloaded wheel for {}".format(to_download))
     logging.debug("downloaded wheel %s", result.name)
+    if verify_against_pypi:
+        verify_wheel_digest(result)
     return result
 
 

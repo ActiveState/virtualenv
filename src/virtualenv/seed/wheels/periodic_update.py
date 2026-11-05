@@ -4,6 +4,7 @@ Periodically update bundled versions.
 
 from __future__ import absolute_import, unicode_literals
 
+import hashlib
 import json
 import logging
 import os
@@ -15,7 +16,9 @@ from itertools import groupby
 from shutil import copy2
 from textwrap import dedent
 from threading import Thread
+from time import sleep
 
+from six import string_types
 from six.moves.urllib.error import URLError
 from six.moves.urllib.request import urlopen
 
@@ -330,6 +333,59 @@ def release_date_for_wheel_path(dest):
     return None
 
 
+#: Pauses between PyPI metadata lookups before refusing a wheel we could not verify, to ride out a brief outage or a
+#: JSON API that has not caught up with a fresh upload.
+_DIGEST_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
+
+def verify_wheel_digest(wheel):
+    """Verify a downloaded wheel's sha256 against the digest PyPI's JSON API reports for that release.
+
+    ``pip download`` trusts whatever index it is configured to use, and nothing else in this module checks the bytes it
+    hands back. Callers run this only when pip used the default index, so PyPI served the file and must list its digest.
+    A failed metadata request, an unknown filename or a missing sha256 therefore fails like a mismatch: accepting the
+    wheel in those cases would let anyone who can block ``pypi.org/pypi`` turn the check off.
+
+    :raises UnverifiedWheelError: if PyPI's sha256 for this exact filename cannot be obtained after retrying.
+    :raises RuntimeError: if the sha256 does not match.
+    """
+    expected = _pypi_sha256_for_wheel(wheel)
+    for delay in _DIGEST_RETRY_DELAYS:
+        if expected is not None:
+            break
+        logging.warning("could not obtain the sha256 of %s from PyPI, retrying in %s seconds", wheel.name, delay)
+        _PYPI_CACHE.pop(wheel.distribution, None)
+        sleep(delay)
+        expected = _pypi_sha256_for_wheel(wheel)
+    if expected is None:
+        msg = "refusing downloaded wheel {}: could not obtain its sha256 from PyPI to verify it".format(wheel.name)
+        raise UnverifiedWheelError(msg)
+    actual = hashlib.sha256(wheel.path.read_bytes()).hexdigest()
+    if actual != expected:
+        msg = "downloaded wheel {} has sha256 {}, but PyPI reports {} for this release".format(
+            wheel.name,
+            actual,
+            expected,
+        )
+        raise RuntimeError(msg)
+
+
+class UnverifiedWheelError(RuntimeError):
+    """PyPI's digest for a downloaded wheel was unavailable, so a caller may fall back to the bundled wheel."""
+
+
+def _pypi_sha256_for_wheel(wheel):
+    content = _pypi_get_distribution_info_cached(wheel.distribution)
+    releases = content.get("releases") if isinstance(content, dict) else None
+    entries = releases.get(wheel.version) if isinstance(releases, dict) else None
+    if not isinstance(entries, list):
+        return None
+    entry = next((e for e in entries if isinstance(e, dict) and e.get("filename") == wheel.name), {})
+    digests = entry.get("digests")
+    sha256 = digests.get("sha256") if isinstance(digests, dict) else None
+    return sha256 if isinstance(sha256, string_types) else None
+
+
 def _request_context():
     yield None
     # fallback to non verified HTTPS (the information we request is not sensitive, so fallback)
@@ -417,6 +473,8 @@ def _run_manual_upgrade(app_data, distribution, for_py_version, env):
 __all__ = (
     "add_wheel_to_update_log",
     "periodic_update",
+    "UnverifiedWheelError",
+    "verify_wheel_digest",
     "do_update",
     "manual_upgrade",
     "NewVersion",
