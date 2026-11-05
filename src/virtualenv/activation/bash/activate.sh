@@ -35,6 +35,7 @@ deactivate () {
     fi
 
     unset VIRTUAL_ENV
+    unset VIRTUAL_ENV_PROMPT
     if [ ! "${1-}" = "nondestructive" ] ; then
     # Self destruct!
         unset -f deactivate
@@ -60,12 +61,33 @@ if ! [ -z "${PYTHONHOME+_}" ] ; then
     unset PYTHONHOME
 fi
 
-if [ -z "${VIRTUAL_ENV_DISABLE_PROMPT-}" ] ; then
+if [ "x"__VIRTUAL_PROMPT__ != x ] ; then
+    VIRTUAL_ENV_PROMPT=__VIRTUAL_PROMPT__
+else
+    VIRTUAL_ENV_PROMPT=$(basename "$VIRTUAL_ENV")
+fi
+export VIRTUAL_ENV_PROMPT
+
+if [ -z "${VIRTUAL_ENV_DISABLE_PROMPT-}" ] &&
+    { [ -n "${BASH_VERSION-}" ] || [ -n "${ZSH_VERSION-}" ]; }; then
     _OLD_VIRTUAL_PS1="${PS1-}"
-    if [ "x"__VIRTUAL_PROMPT__ != x ] ; then
-        PS1=(__VIRTUAL_PROMPT__) ${PS1-}
+    # The prompt text (from --prompt or the environment directory name) must never be interpreted by the shell.
+    # bash expands PS1 after decoding its prompt escapes when promptvars is on or in posix mode, so the prompt holds a
+    # reference to the variable and its value never reaches that expansion; otherwise only the decode runs and
+    # backslashes need doubling. zsh re-expands backslashes, dollar signs and backticks under PROMPT_SUBST, which a
+    # user can set after activation, and reads % as a prompt escape. The guards keep the substitutions away from
+    # POSIX shells such as dash, which reject them with "Bad substitution".
+    if [ -n "${BASH_VERSION-}" ] && { shopt -q promptvars || shopt -qo posix; }; then
+        PS1='(${VIRTUAL_ENV_PROMPT-}) '"${PS1-}"
     else
-        PS1=(`basename \"$VIRTUAL_ENV\"`) ${PS1-}
+        _VIRTUAL_PROMPT="${VIRTUAL_ENV_PROMPT//\\/\\\\}"
+        if [ -n "${ZSH_VERSION-}" ]; then
+            _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\$/\\\$}"
+            _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\`/\\\`}"
+            _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\%/%%}"
+        fi
+        PS1="(${_VIRTUAL_PROMPT}) ${PS1-}"
+        unset _VIRTUAL_PROMPT
     fi
     export PS1
 fi
