@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from virtualenv.info import IS_WIN, PY2
-from virtualenv.util.path import Path, copy
+from virtualenv.util.path import Path, copy, write_file
 from virtualenv.util.subprocess import run_cmd
 
 
@@ -73,3 +73,29 @@ def test_copy_replaces_contents(tmp_path, directory):
     destination.write_bytes(b"old")
     copy(source if directory else source / "entry", destination)
     assert (destination / "entry" if directory else destination).read_bytes() == b"new"
+
+
+@pytest.mark.parametrize("existing", [pytest.param(False, id="new"), pytest.param(True, id="replace")])
+def test_write_file_replaces_content(tmp_path, existing):
+    path = Path(str(tmp_path)) / "generated"
+    if existing:
+        path.write_bytes(b"previous")
+    write_file(path, b"generated")
+    assert path.read_bytes() == b"generated"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or IS_WIN, reason="requires symlinks")
+@pytest.mark.parametrize("existing", [pytest.param(False, id="dangling"), pytest.param(True, id="existing")])
+def test_write_file_replaces_link(tmp_path, existing):
+    root = Path(str(tmp_path))
+    target = root / "target"
+    if existing:
+        target.write_bytes(b"original")
+    path = root / "generated"
+    path.symlink_to(target)
+    write_file(path, b"generated")
+    assert (path.is_symlink(), path.read_bytes(), target.read_bytes() if existing else target.exists()) == (
+        False,
+        b"generated",
+        b"original" if existing else False,
+    )

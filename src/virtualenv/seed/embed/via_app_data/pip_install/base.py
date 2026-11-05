@@ -197,4 +197,8 @@ class ScriptMakerCustom(ScriptMaker):
 
     def _write_script(self, names, shebang, script_bytes, filenames, ext):
         names.add("{}{}.{}".format(self._name, *self.version_info))
+        for name in names:  # distlib opens the script path directly, so a planted (dangling) link would be followed
+            path = Path(self.target_dir) / ("{}.exe".format(name) if os.name == "nt" else name)
+            if path.is_symlink():
+                path.unlink()
         super(ScriptMakerCustom, self)._write_script(names, shebang, script_bytes, filenames, ext)

@@ -9,7 +9,7 @@ from six import add_metaclass
 from virtualenv.create.describe import Python2Supports
 from virtualenv.create.via_global_ref.builtin.ref import PathRefToDest
 from virtualenv.info import IS_ZIPAPP
-from virtualenv.util.path import Path
+from virtualenv.util.path import Path, write_file
 from virtualenv.util.six import ensure_text
 from virtualenv.util.zipapp import read as read_from_zipapp
 
@@ -48,7 +48,7 @@ class Python2(ViaGlobalRefVirtualenvBuiltin, Python2Supports):
         skip_rewrite = os.linesep.join("            {}".format(i) for i in self.skip_rewrite.splitlines()).lstrip()
         custom_site_text = custom_site_text.replace("# ___SKIP_REWRITE____", skip_rewrite)
 
-        site_py.write_text(custom_site_text)
+        write_file(site_py, custom_site_text.encode("utf-8"))
 
     @property
     def reload_code(self):

@@ -3,6 +3,7 @@ from __future__ import absolute_import, unicode_literals
 import logging
 from collections import OrderedDict
 
+from virtualenv.util.path import write_file
 from virtualenv.util.six import ensure_text
 from virtualenv.util.text import collapse_line_boundaries
 
@@ -41,7 +42,7 @@ class PyEnvCfg(object):
             logging.debug("\t%s", line)
             text += line
             text += "\n"
-        self.path.write_text(text, encoding="utf-8")
+        write_file(self.path, text.encode("utf-8"))
 
     def refresh(self):
         self.content = self._read_values(self.path)

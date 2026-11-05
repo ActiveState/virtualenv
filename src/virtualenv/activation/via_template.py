@@ -11,6 +11,7 @@ except ImportError:  # Python 2
 
 from six import add_metaclass
 
+from virtualenv.util.path import write_file
 from virtualenv.util.six import ensure_text
 
 from .activator import Activator
@@ -58,8 +59,8 @@ class ViaTemplateActivator(Activator):
         for template in templates:
             text = self.instantiate_template(replacements, template, creator)
             dest = to_folder / self.as_name(template)
-            # use write_bytes to avoid platform specific line normalization (\n -> \r\n)
-            dest.write_bytes(text.encode("utf-8"))
+            # write bytes to avoid platform specific line normalization (\n -> \r\n), replacing any existing link
+            write_file(dest, text.encode("utf-8"))
             generated.append(dest)
         return generated
 

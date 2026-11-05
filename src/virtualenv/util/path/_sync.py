@@ -5,7 +5,7 @@ import io
 import logging
 import os
 import shutil
-from stat import S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR
+from stat import S_ISDIR, S_ISLNK, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR
 
 from six import PY2
 
@@ -27,6 +27,63 @@ def ensure_dir(path):
     if not path.exists():
         logging.debug("create folder %s", ensure_text(str(path)))
         os.makedirs(norm(path))
+
+
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003  # stat.IO_REPARSE_TAG_MOUNT_POINT, only exposed by Python 3.8+
+
+
+def _is_junction(metadata):
+    # st_reparse_tag only exists on Windows with Python 3.8+, older interpreters cannot tell a junction apart
+    return IS_WIN and getattr(metadata, "st_reparse_tag", 0) == _IO_REPARSE_TAG_MOUNT_POINT
+
+
+def ensure_within(root, path):
+    """Create path (a folder within root) so that every component is a real directory, replacing planted links."""
+    parts = path.relative_to(root).parts
+    if ".." in parts:
+        raise ValueError("environment directory {} must remain inside {}".format(path, root))
+    ensure_dir(root)
+    folder = root
+    for part in parts:
+        folder = folder / part
+        name = norm(folder)
+        try:
+            metadata = os.lstat(name)
+        except OSError as exception:
+            if exception.errno != errno.ENOENT:
+                raise
+        else:
+            if S_ISLNK(metadata.st_mode):
+                logging.warning("replace environment directory link %s", ensure_text(str(folder)))
+                try:
+                    os.unlink(name)
+                except OSError:
+                    if not IS_WIN:
+                        raise
+                    os.rmdir(name)  # directory symlinks on Windows Python 2
+            elif _is_junction(metadata):
+                logging.warning("replace environment directory junction %s", ensure_text(str(folder)))
+                os.rmdir(name)
+        try:
+            os.mkdir(name)
+        except OSError as exception:
+            if exception.errno != errno.EEXIST:
+                raise
+            created = os.lstat(name)
+            if not S_ISDIR(created.st_mode) or _is_junction(created):
+                # on Python 3 the errno makes this a NotADirectoryError
+                msg = "environment directory is not a real directory: {}".format(ensure_text(str(folder)))
+                raise OSError(errno.ENOTDIR, msg)
+
+
+def write_file(path, data):
+    """Write data to a new file at path, replacing (not following) an existing file or symbolic/hard link."""
+    if path.is_symlink() or path.exists():
+        path.unlink()
+    # exclusive creation rejects links introduced after the old entry was removed
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    with io.open(os.open(norm(path), flags, 0o666), "wb") as stream:
+        stream.write(data)
 
 
 def ensure_safe_to_do(src, dest):
@@ -106,6 +163,8 @@ class _Debug(object):
 
 __all__ = (
     "ensure_dir",
+    "ensure_within",
+    "write_file",
     "symlink",
     "copy",
     "symlink",

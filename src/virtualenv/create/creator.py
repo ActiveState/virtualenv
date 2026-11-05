@@ -14,7 +14,7 @@ from six import add_metaclass
 
 from virtualenv.discovery.cached_py_info import LogCmd
 from virtualenv.info import WIN_CPYTHON_2
-from virtualenv.util.path import Path, safe_delete
+from virtualenv.util.path import Path, safe_delete, write_file
 from virtualenv.util.six import ensure_str, ensure_text
 from virtualenv.util.subprocess import run_cmd
 from virtualenv.version import __version__
@@ -185,13 +185,16 @@ class Creator(object):
         # mark this folder to be ignored by VCS, handle https://www.python.org/dev/peps/pep-0610/#registered-vcs
         git_ignore = self.dest / ".gitignore"
         if not git_ignore.exists():
-            git_ignore.write_text(
+            write_file(
+                git_ignore,
                 dedent(
                     """
                     # created by virtualenv automatically
                     *
                     """,
-                ).lstrip(),
+                )
+                .lstrip()
+                .encode("utf-8"),
             )
         # Mercurial - does not support the .hgignore file inside a subdirectory directly, but only if included via the
         # subinclude directive from root, at which point on might as well ignore the directory itself, see
