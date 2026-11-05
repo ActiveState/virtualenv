@@ -154,10 +154,10 @@ class PipInstall(object):
         paths = (p for p in in_folders if p.stem.split("-")[0] == dist_name and p.suffix == ".dist-info" and p.is_dir())
         existing_dist = next(paths, None)
         if existing_dist is not None:
-            self._uninstall_dist(existing_dist)
+            self._uninstall_dist(existing_dist, self._creator.dest)
 
     @staticmethod
-    def _uninstall_dist(dist):
+    def _uninstall_dist(dist, env_dir):
         dist_base = dist.parent
         logging.debug("uninstall existing distribution %s from %s", dist.stem, dist_base)
 
@@ -171,12 +171,26 @@ class PipInstall(object):
             if not any(p in base_dirs for p in path.parents):  # only add if not already added as a base dir
                 paths.add(path)
 
-        for path in sorted(paths):  # actually remove stuff in a stable order
-            if path.exists():
-                if path.is_dir() and not path.is_symlink():
-                    safe_delete(path)
+        # metadata is untrusted: only remove entries inside the environment, never the environment itself or a folder
+        # holding the metadata (a blank top_level.txt line names site-packages)
+        root = env_dir.resolve()
+        metadata_parents = set(dist.resolve().parents)
+        for entry in sorted(paths):  # actually remove stuff in a stable order
+            if entry.exists() or entry.is_symlink():
+                linked = entry.is_symlink()
+                # unlinking the final link leaves its target intact; parent links still affect containment
+                resolved = entry.parent.resolve() / entry.name if linked else entry.resolve()
+                if root not in resolved.parents or resolved in metadata_parents:
+                    logging.warning(
+                        "skip removal of %s listed by %s: not inside environment %s or a parent of the metadata",
+                        entry,
+                        dist.name,
+                        root,
+                    )
+                elif entry.is_dir() and not linked:
+                    safe_delete(entry)
                 else:
-                    path.unlink()
+                    entry.unlink()
 
     def clear(self):
         if self._image_dir.exists():

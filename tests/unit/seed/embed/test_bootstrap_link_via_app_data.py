@@ -320,3 +320,78 @@ def test_pip_launcher_record_matches_contents(tmp_path, name, via_shell):
     assert content.startswith(b"#!/bin/sh\n") is via_shell
     digest = urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=")
     assert row[1:] == [b"sha256=" + digest, str(len(content)).encode("ascii")]
+
+
+@pytest.mark.parametrize(
+    ("metadata_file", "content"),
+    [
+        pytest.param("top_level.txt", "pip\n{dest}\n", id="top-level-env-root"),
+        pytest.param("top_level.txt", "pip\n\n", id="top-level-blank"),
+        pytest.param("RECORD", "{record}\n{outside},,", id="record-traversal"),
+    ],
+)
+def test_seed_metadata_cleanup_stays_inside_package(tmp_path, caplog, metadata_file, content):
+    args = [ensure_text(str(tmp_path / "env")), "--pip", "embed", "--no-periodic-update"]
+    session = cli_run(args, setup_logging=False)
+    purelib = session.creator.purelib
+    markers = [tmp_path / "keep.txt", session.creator.dest / "keep.txt", purelib / "keep.txt"]
+    for marker in markers:
+        marker.write_text("keep")
+    dist_info = next(purelib.glob("pip-*.dist-info"))
+    (dist_info / metadata_file).write_text(
+        content.format(
+            dest=ensure_text(str(session.creator.dest)),
+            outside=os.path.relpath(ensure_text(str(markers[0])), ensure_text(str(purelib))),
+            record=(dist_info / "RECORD").read_text(),
+        ),
+    )
+    cli_run(args, setup_logging=False)
+    assert (
+        [i.exists() for i in markers],
+        (purelib / "pip" / "__init__.py").is_file(),
+        "skip removal of" in caplog.text,
+    ) == ([True, True, True], True, True)
+
+
+@pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable")
+def test_seed_metadata_unlinks_symlink_without_following(tmp_path, caplog):
+    args = [ensure_text(str(tmp_path / "env")), "--pip", "embed", "--no-periodic-update"]
+    session = cli_run(args, setup_logging=False)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    link = session.creator.purelib / "linked"
+    link.symlink_to(outside, target_is_directory=True)
+    record = next(session.creator.purelib.glob("pip-*.dist-info")) / "RECORD"
+    record.write_text("{}\nlinked,,".format(record.read_text()))
+    cli_run(args, setup_logging=False)
+    assert (link.is_symlink(), (outside / "keep.txt").exists(), "skip removal of" in caplog.text) == (
+        False,
+        True,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "linked",
+    [
+        pytest.param(False, id="copy"),
+        pytest.param(
+            True,
+            id="symlink",
+            marks=pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable"),
+        ),
+    ],
+)
+def test_seed_metadata_keeps_reseeding_supported(tmp_path, linked, caplog):
+    args = [ensure_text(str(tmp_path / "env")), "--pip", "embed", "--no-periodic-update"]
+    if linked:
+        args.append("--symlink-app-data")
+    cli_run(args, setup_logging=False)
+    session = cli_run(args, setup_logging=False)
+    package = session.creator.purelib / "pip"
+    assert ((package / "__init__.py").is_file(), package.is_symlink(), "skip removal of" in caplog.text) == (
+        True,
+        linked,
+        False,
+    )
