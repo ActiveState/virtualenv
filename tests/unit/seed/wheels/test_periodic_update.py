@@ -469,7 +469,9 @@ def test_new_version_ne():
     )
 
 
-def test_get_release_unsecure(mocker, caplog):
+def test_get_release_unsecure(mocker, caplog, monkeypatch):
+    monkeypatch.setenv(str("VIRTUALENV_PERIODIC_UPDATE_INSECURE"), str("1"))
+
     @contextmanager
     def _release(of, context):
         assert of == "https://pypi.org/pypi/pip/json"
@@ -486,6 +488,42 @@ def test_get_release_unsecure(mocker, caplog):
     assert url_o.call_count == 2
     assert "insecure" in caplog.text
     assert " failed " in caplog.text
+
+
+def test_get_release_no_unverified_fallback_by_default(mocker, caplog, monkeypatch):
+    """The PyPI metadata supplies the digest seed wheels are verified against: never fetch it over unverified TLS."""
+    monkeypatch.delenv(str("VIRTUALENV_PERIODIC_UPDATE_INSECURE"), raising=False)
+    url_o = mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", side_effect=URLError("insecure"))
+
+    result = release_date_for_wheel_path(Path("pip-20.1.whl"))
+
+    assert result is None
+    assert url_o.call_count == 1
+    assert url_o.call_args[1]["context"] is None
+
+
+class _Py2Response(object):
+    """Mimics Python 2's urlopen result, which has close() but is not a context manager."""
+
+    def __init__(self, text):
+        self._stream = StringIO(text)
+        self.closed = False
+
+    def read(self, *args):
+        return self._stream.read(*args)
+
+    def close(self):
+        self.closed = True
+
+
+def test_get_release_without_context_manager_response(mocker):
+    response = _Py2Response(json.dumps({"releases": {"20.1": [{"upload_time": "2020-12-22T12:12:12"}]}}))
+    mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", return_value=response)
+
+    result = release_date_for_wheel_path(Path("pip-20.1.whl"))
+
+    assert result == datetime(year=2020, month=12, day=22, hour=12, minute=12, second=12)
+    assert response.closed
 
 
 def test_get_release_fails(mocker, caplog):
@@ -609,7 +647,7 @@ def test_download_stop_with_embed(tmp_path, mocker, freezer):
     do_update("pip", "3.9", str(wheel.path), str(app_data_outer), [], True)
 
     assert download_wheel.call_count == 3
-    assert url_o.call_count == 2
+    assert url_o.call_count == 1  # no unverified-TLS retry unless VIRTUALENV_PERIODIC_UPDATE_INSECURE is set
 
     assert read_dict.call_count == 1
     assert write.call_count == 1
@@ -632,7 +670,7 @@ def test_download_manual_stop_after_one_download(tmp_path, mocker, freezer):
     do_update("pip", "3.9", str(wheel.path), str(app_data_outer), [], False)
 
     assert download_wheel.call_count == 1
-    assert url_o.call_count == 2
+    assert url_o.call_count == 1  # no unverified-TLS retry unless VIRTUALENV_PERIODIC_UPDATE_INSECURE is set
     assert read_dict.call_count == 1
     assert write.call_count == 1
 
@@ -655,7 +693,7 @@ def test_download_manual_ignores_pre_release(tmp_path, mocker, freezer):
     do_update("pip", "3.9", str(wheel.path), str(app_data_outer), [], False)
 
     assert download_wheel.call_count == 1
-    assert url_o.call_count == 2
+    assert url_o.call_count == 1  # no unverified-TLS retry unless VIRTUALENV_PERIODIC_UPDATE_INSECURE is set
     assert read_dict.call_count == 1
     assert write.call_count == 1
     wrote_json = write.call_args[0][0]

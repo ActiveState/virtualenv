@@ -11,6 +11,7 @@ import os
 import ssl
 import subprocess
 import sys
+from contextlib import closing
 from datetime import datetime, timedelta
 from itertools import groupby
 from shutil import copy2
@@ -388,8 +389,13 @@ def _pypi_sha256_for_wheel(wheel):
 
 def _request_context():
     yield None
-    # fallback to non verified HTTPS (the information we request is not sensitive, so fallback)
-    yield ssl._create_unverified_context()  # noqa
+    # the PyPI metadata now supplies the digest downloaded seed wheels are verified against, so it must not silently
+    # come over unverified HTTPS; that fallback is only kept as an explicit opt-in
+    if os.environ.get(str("VIRTUALENV_PERIODIC_UPDATE_INSECURE"), "").strip().lower() in ("1", "true", "yes", "on"):
+        logging.warning(
+            "falling back to unverified HTTPS for PyPI metadata because VIRTUALENV_PERIODIC_UPDATE_INSECURE is enabled",
+        )
+        yield ssl._create_unverified_context()  # noqa
 
 
 _PYPI_CACHE = {}
@@ -401,13 +407,21 @@ def _pypi_get_distribution_info_cached(distribution):
     return _PYPI_CACHE[distribution]
 
 
+def _load_json(response):
+    if hasattr(response, "__enter__"):
+        with response as file_handler:
+            return json.load(file_handler)
+    # Python 2's urlopen result is not a context manager
+    with closing(response) as file_handler:
+        return json.load(file_handler)
+
+
 def _pypi_get_distribution_info(distribution):
     content, url = None, "https://pypi.org/pypi/{}/json".format(distribution)
     try:
         for context in _request_context():
             try:
-                with urlopen(url, context=context) as file_handler:
-                    content = json.load(file_handler)
+                content = _load_json(urlopen(url, context=context))
                 break
             except URLError as exception:
                 logging.error("failed to access %s because %r", url, exception)
