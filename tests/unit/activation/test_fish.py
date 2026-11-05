@@ -40,6 +40,8 @@ def test_fish(activation_tester_class, activation_tester, monkeypatch, tmp_path)
         pytest.param(None, "x\\'(touch PWNED)'\\'", id="dirname-backslash-quote"),
         pytest.param(None, "x'(touch PWNED)'y", id="dirname-quote"),
         pytest.param(None, 'x"(touch PWNED)"y', id="dirname-double-quote"),
+        pytest.param(None, "A__VIRTUAL_NAME__B/x'(touch PWNED)'y", id="placeholder-in-parent-dir"),
+        pytest.param(None, "A__VIRTUAL_PROMPT__B/x'$(touch PWNED)'y", id="prompt-placeholder-in-parent-dir"),
     ],
 )
 def test_fish_activate_does_not_run_commands(tmp_path, current_fastest, prompt, env_name):
@@ -76,4 +78,4 @@ def test_fish_activate_does_not_run_commands(tmp_path, current_fastest, prompt, 
 
     assert not (work_dir / "PWNED").exists(), err
     assert out.startswith("{}|".format(dest)), (out, err)
-    assert "({}) ".format(prompt if prompt is not None else env_name) in out, (out, err)
+    assert "({}) ".format(prompt if prompt is not None else env_name.split("/")[-1]) in out, (out, err)

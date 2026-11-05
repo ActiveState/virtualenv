@@ -111,6 +111,8 @@ def prompt_after_activate(request, tmp_path, current_fastest):
         pytest.param(None, "x$(touch PWNED)y", id="dirname-command-substitution"),
         pytest.param(None, "x\\$(touch PWNED)y", id="dirname-backslash-command-substitution"),
         pytest.param(None, "x`touch PWNED`y", id="dirname-backticks"),
+        pytest.param(None, "A__VIRTUAL_NAME__B/x'$(touch PWNED)'y", id="placeholder-in-parent-dir"),
+        pytest.param(None, "A__BIN_NAME__B/x'$(touch PWNED)'y", id="bin-placeholder-in-parent-dir"),
     ],
 )
 def test_prompt_does_not_run_commands(prompt_after_activate, prompt, env_name):
