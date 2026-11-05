@@ -1,9 +1,11 @@
 from __future__ import absolute_import, unicode_literals
 
 import contextlib
+import hashlib
 import os
 import subprocess
 import sys
+from base64 import urlsafe_b64encode
 from stat import S_IWGRP, S_IWOTH, S_IWUSR
 from threading import Thread
 
@@ -242,3 +244,286 @@ def _run_parallel_threads(tmp_path):
     for thread in threads:
         thread.join()
     return exceptions
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("plain", id="plain"),
+        pytest.param("two words", id="space"),
+        pytest.param("owner's env", id="apostrophe"),
+        pytest.param("$(touch pwned) `touch pwned`", id="command-substitution"),
+        pytest.param("a" * 120, id="long", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX shebang limit")),
+        pytest.param("env \\path", id="backslash", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX filename")),
+        pytest.param("env\tname", id="tab", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX filename")),
+    ],
+)
+@pytest.mark.parametrize(
+    "via_python",
+    [
+        pytest.param(False, id="launcher"),
+        pytest.param(
+            True,
+            id="python",
+            marks=pytest.mark.skipif(os.name == "nt", reason="Windows launcher is an executable"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("seeder", [pytest.param("app-data", id="app-data"), pytest.param("pip", id="pip")])
+def test_console_script_preserves_interpreter_path(tmp_path, current_fastest, name, via_python, seeder):
+    work = tmp_path / "work"
+    work.mkdir()
+    destination = os.path.join(ensure_text(str(tmp_path)), name, "env")
+    # create in a fresh interpreter: tests/unit/create/.../testing/path.py sets a "\\" altsep on the shared POSIX path
+    # flavour at import time, which would turn the backslash of the "backslash" case into a separator in-process
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "virtualenv",
+            destination,
+            "--seeder",
+            seeder,
+            "--creator",
+            current_fastest,
+            "--activators",
+            "",
+            "--no-periodic-update",
+            "--pip",
+            "embed",
+        ],
+    )
+    scripts = os.path.join(destination, "Scripts" if os.name == "nt" else "bin")
+    cmd = ([os.path.join(scripts, "python")] if via_python else []) + [
+        os.path.join(scripts, "pip.exe" if os.name == "nt" else "pip"),
+        "--version",
+    ]
+    process = Popen(cmd, cwd=ensure_text(str(work)), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = process.communicate()
+    assert process.returncode == 0, err
+    assert os.path.normcase(destination) in os.path.normcase(out.decode("utf-8"))
+    assert list(work.iterdir()) == []  # nothing in the destination path was executed by the shell
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell launchers")
+@pytest.mark.parametrize(
+    ("name", "via_shell"),
+    [
+        pytest.param("plain", False, id="plain"),
+        pytest.param("two words", True, id="space"),
+        pytest.param("env\tname", True, id="tab"),
+    ],
+)
+def test_pip_launcher_record_matches_contents(tmp_path, name, via_shell):
+    session = cli_run([ensure_text(str(tmp_path / name)), "--seeder", "pip", "--pip", "embed", "--no-periodic-update"])
+    record = next(session.creator.purelib.glob("pip-*.dist-info/RECORD"))
+    with open(str(record), "rb") as file_handler:
+        rows = [line.split(b",") for line in file_handler.read().splitlines()]
+    row = next(row for row in rows if row[0].endswith(b"/bin/pip"))
+    with open(str(session.creator.script_dir / "pip"), "rb") as file_handler:
+        content = file_handler.read()
+    assert content.startswith(b"#!/bin/sh\n") is via_shell
+    digest = urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=")
+    assert row[1:] == [b"sha256=" + digest, str(len(content)).encode("ascii")]
+
+
+@pytest.mark.parametrize(
+    ("metadata_file", "content"),
+    [
+        pytest.param("top_level.txt", "pip\n{dest}\n", id="top-level-env-root"),
+        pytest.param("top_level.txt", "pip\n\n", id="top-level-blank"),
+        pytest.param("RECORD", "{record}\n{outside},,", id="record-traversal"),
+    ],
+)
+def test_seed_metadata_cleanup_stays_inside_package(tmp_path, caplog, metadata_file, content):
+    args = [ensure_text(str(tmp_path / "env")), "--pip", "embed", "--no-periodic-update"]
+    session = cli_run(args, setup_logging=False)
+    purelib = session.creator.purelib
+    markers = [tmp_path / "keep.txt", session.creator.dest / "keep.txt", purelib / "keep.txt"]
+    for marker in markers:
+        marker.write_text("keep")
+    dist_info = next(purelib.glob("pip-*.dist-info"))
+    (dist_info / metadata_file).write_text(
+        content.format(
+            dest=ensure_text(str(session.creator.dest)),
+            outside=os.path.relpath(ensure_text(str(markers[0])), ensure_text(str(purelib))),
+            record=(dist_info / "RECORD").read_text(),
+        ),
+    )
+    cli_run(args, setup_logging=False)
+    assert (
+        [i.exists() for i in markers],
+        (purelib / "pip" / "__init__.py").is_file(),
+        "skip removal of" in caplog.text,
+    ) == ([True, True, True], True, True)
+
+
+@pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable")
+def test_seed_metadata_unlinks_symlink_without_following(tmp_path, caplog):
+    args = [ensure_text(str(tmp_path / "env")), "--pip", "embed", "--no-periodic-update"]
+    session = cli_run(args, setup_logging=False)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    link = session.creator.purelib / "linked"
+    link.symlink_to(outside, target_is_directory=True)
+    record = next(session.creator.purelib.glob("pip-*.dist-info")) / "RECORD"
+    record.write_text("{}\nlinked,,".format(record.read_text()))
+    cli_run(args, setup_logging=False)
+    assert (link.is_symlink(), (outside / "keep.txt").exists(), "skip removal of" in caplog.text) == (
+        False,
+        True,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "linked",
+    [
+        pytest.param(False, id="copy"),
+        pytest.param(
+            True,
+            id="symlink",
+            marks=pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable"),
+        ),
+    ],
+)
+def test_seed_metadata_keeps_reseeding_supported(tmp_path, linked, caplog):
+    args = [ensure_text(str(tmp_path / "env")), "--pip", "embed", "--no-periodic-update"]
+    if linked:
+        args.append("--symlink-app-data")
+    cli_run(args, setup_logging=False)
+    session = cli_run(args, setup_logging=False)
+    package = session.creator.purelib / "pip"
+    assert ((package / "__init__.py").is_file(), package.is_symlink(), "skip removal of" in caplog.text) == (
+        True,
+        linked,
+        False,
+    )
+
+
+_DISK_FULL = OSError(28, "No space left on device")
+
+
+def _fail_during_extraction(zip_ref, path=None, members=None, pwd=None):
+    # stop short of the last entries, where the wheel keeps its dist-info files
+    for info in zip_ref.infolist()[:-5]:
+        zip_ref.extract(info, path)
+    raise _DISK_FULL
+
+
+@pytest.mark.parametrize(
+    "target, failure, linked",
+    [
+        pytest.param("zipfile.ZipFile.extractall", _fail_during_extraction, False, id="copy-extract"),
+        pytest.param(
+            "virtualenv.seed.embed.via_app_data.pip_install.copy.CopyPipInstall._generate_new_files",
+            _DISK_FULL,
+            False,
+            id="copy-finish",
+        ),
+        pytest.param(
+            "zipfile.ZipFile.extractall",
+            _fail_during_extraction,
+            True,
+            id="symlink-extract",
+            marks=pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable"),
+        ),
+        pytest.param(
+            "virtualenv.seed.embed.via_app_data.pip_install.symlink.set_tree",
+            _DISK_FULL,
+            True,
+            id="symlink-read-only",
+            marks=pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable"),
+        ),
+    ],
+)
+def test_seed_image_build_failure_leaves_no_partial_image(tmp_path, mocker, target, failure, linked):
+    """A failed image build must not leave a partial image that later runs would reuse (upstream #3487)."""
+    cache = tmp_path / "cache"
+    args = [
+        ensure_text(str(tmp_path / "env")),
+        "--app-data",
+        ensure_text(str(cache)),
+        "--no-periodic-update",
+        "--no-setuptools",
+        "--no-wheel",
+    ]
+    if linked:
+        args.append("--symlink-app-data")
+    kwargs = {"autospec": True} if callable(failure) else {}
+    with mocker.mock_module.patch(target, side_effect=failure, **kwargs):
+        with pytest.raises(Exception, match="No space left on device"):
+            cli_run(args, setup_logging=False)
+    installer = "SymlinkPipInstall" if linked else "CopyPipInstall"
+    images = next(cache.glob("wheel/*/image/1"))
+    left = sorted(i.name for i in list(images.iterdir()) + list((images / installer).iterdir()) if i.is_dir())
+    purelib = cli_run(args, setup_logging=False).creator.purelib
+    dist_info = next(purelib.glob("pip-*.dist-info"))
+    result = (
+        left,
+        (dist_info / "INSTALLER").is_file(),
+        (dist_info / "RECORD").is_file(),
+        (purelib / "{}.virtualenv".format(dist_info.stem)).is_file(),
+    )
+    assert result == ([installer], True, True, True)
+
+
+@pytest.mark.parametrize(
+    "leftover, files, kept",
+    [
+        pytest.param("CopyPipInstall-{}", ("pip.py",), False, id="killed-build"),
+        pytest.param("CopyPipInstall/{}", (), True, id="empty-image"),
+    ],
+)
+def test_seed_image_build_replaces_leftovers(tmp_path, leftover, files, kept):
+    cache = tmp_path / "cache"
+    version = PythonInfo.current_system().version_release_str
+    wheel_stem = os.path.splitext(BUNDLE_SUPPORT[version]["pip"])[0]
+    path = cache / "wheel" / version / "image" / "1" / leftover.format(wheel_stem)
+    path.mkdir(parents=True)
+    for name in files:
+        (path / name).write_text("")
+    args = [ensure_text(str(tmp_path / "env")), "--app-data", ensure_text(str(cache)), "--no-periodic-update"]
+    args += ["--no-setuptools", "--no-wheel", "--pip", "embed"]
+    purelib = cli_run(args, setup_logging=False).creator.purelib
+    assert (path.exists(), (next(purelib.glob("pip-*.dist-info")) / "RECORD").is_file()) == (kept, True)
+
+
+@pytest.fixture
+def unusable_cache(tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.write_text("")
+    return blocked / "cache"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("environment", id="environment"),
+        pytest.param("configuration", id="configuration"),
+        pytest.param("command-line", id="command-line"),
+    ],
+)
+def test_transient_seed_survives_cache_cleanup(tmp_path, source, unusable_cache):
+    """GHSA-4f8h-vr72-p32c: seeding from temporary app-data must copy, never link into the removed folder."""
+    config = tmp_path / "virtualenv.ini"
+    config.write_text("[virtualenv]\nsymlink_app_data = true\n" if source == "configuration" else "")
+    env = os.environ.copy()
+    env[str("VIRTUALENV_CONFIG_FILE")] = str(config)
+    env[str("VIRTUALENV_OVERRIDE_APP_DATA")] = str(unusable_cache)
+    if source == "environment":
+        env[str("VIRTUALENV_SYMLINK_APP_DATA")] = str("true")
+    dest = os.path.join(ensure_text(str(tmp_path)), "env")
+    args = [dest, "--no-periodic-update", "--no-setuptools", "--no-wheel"]
+    if source == "command-line":
+        args.append("--symlink-app-data")
+    subprocess.check_call([sys.executable, "-m", "virtualenv"] + args, env=env)
+    site_packages = [
+        os.path.join(root, "pip") for root, dirs, _ in os.walk(dest) if root.endswith("site-packages") and "pip" in dirs
+    ]
+    assert len(site_packages) == 1
+    pip_dir = site_packages[0]
+    assert (os.path.islink(pip_dir), os.path.isfile(os.path.join(pip_dir, "__init__.py"))) == (False, True)
+    out = subprocess.check_output([os.path.join(dest, "bin", "python"), "-m", "pip", "--version"])
+    assert b"pip " in out

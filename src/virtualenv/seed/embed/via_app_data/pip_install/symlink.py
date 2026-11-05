@@ -50,8 +50,8 @@ class SymlinkPipInstall(PipInstall):
         with open(ensure_text(str(self._dist_info / "RECORD")), "wb") as file_handler:
             file_handler.write(extra_record_data_str.encode("utf-8"))
 
-    def build_image(self):
-        super(SymlinkPipInstall, self).build_image()
+    def _populate_image(self):
+        super(SymlinkPipInstall, self)._populate_image()
         # protect the image by making it read only
         set_tree(self._image_dir, S_IREAD | S_IRGRP | S_IROTH)
 

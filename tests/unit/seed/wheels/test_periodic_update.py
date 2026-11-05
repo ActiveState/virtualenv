@@ -1,5 +1,6 @@
 from __future__ import absolute_import, unicode_literals
 
+import hashlib
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ from virtualenv.seed.wheels import Wheel
 from virtualenv.seed.wheels.embed import BUNDLE_SUPPORT, get_embed_wheel
 from virtualenv.seed.wheels.periodic_update import (
     NewVersion,
+    UnverifiedWheelError,
     UpdateLog,
     do_update,
     dump_datetime,
@@ -28,6 +30,7 @@ from virtualenv.seed.wheels.periodic_update import (
     periodic_update,
     release_date_for_wheel_path,
     trigger_update,
+    verify_wheel_digest,
 )
 from virtualenv.util.path import Path
 from virtualenv.util.subprocess import CREATE_NO_WINDOW
@@ -38,6 +41,14 @@ def clear_pypi_info_cache():
     from virtualenv.seed.wheels.periodic_update import _PYPI_CACHE
 
     _PYPI_CACHE.clear()
+    yield
+    # the mocked responses must not leak into later tests that verify real downloads in this process
+    _PYPI_CACHE.clear()
+
+
+@pytest.fixture()
+def retry_sleep(mocker):
+    return mocker.patch("virtualenv.seed.wheels.periodic_update.sleep")
 
 
 def test_manual_upgrade(session_app_data, caplog, mocker, for_py_version):
@@ -458,7 +469,9 @@ def test_new_version_ne():
     )
 
 
-def test_get_release_unsecure(mocker, caplog):
+def test_get_release_unsecure(mocker, caplog, monkeypatch):
+    monkeypatch.setenv(str("VIRTUALENV_PERIODIC_UPDATE_INSECURE"), str("1"))
+
     @contextmanager
     def _release(of, context):
         assert of == "https://pypi.org/pypi/pip/json"
@@ -477,6 +490,42 @@ def test_get_release_unsecure(mocker, caplog):
     assert " failed " in caplog.text
 
 
+def test_get_release_no_unverified_fallback_by_default(mocker, caplog, monkeypatch):
+    """The PyPI metadata supplies the digest seed wheels are verified against: never fetch it over unverified TLS."""
+    monkeypatch.delenv(str("VIRTUALENV_PERIODIC_UPDATE_INSECURE"), raising=False)
+    url_o = mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", side_effect=URLError("insecure"))
+
+    result = release_date_for_wheel_path(Path("pip-20.1.whl"))
+
+    assert result is None
+    assert url_o.call_count == 1
+    assert url_o.call_args[1]["context"] is None
+
+
+class _Py2Response(object):
+    """Mimics Python 2's urlopen result, which has close() but is not a context manager."""
+
+    def __init__(self, text):
+        self._stream = StringIO(text)
+        self.closed = False
+
+    def read(self, *args):
+        return self._stream.read(*args)
+
+    def close(self):
+        self.closed = True
+
+
+def test_get_release_without_context_manager_response(mocker):
+    response = _Py2Response(json.dumps({"releases": {"20.1": [{"upload_time": "2020-12-22T12:12:12"}]}}))
+    mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", return_value=response)
+
+    result = release_date_for_wheel_path(Path("pip-20.1.whl"))
+
+    assert result == datetime(year=2020, month=12, day=22, hour=12, minute=12, second=12)
+    assert response.closed
+
+
 def test_get_release_fails(mocker, caplog):
     exc = RuntimeError("oh no")
     url_o = mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", side_effect=exc)
@@ -486,6 +535,87 @@ def test_get_release_fails(mocker, caplog):
     assert result is None
     assert url_o.call_count == 1
     assert repr(exc) in caplog.text
+
+
+def _pypi_release_response(mocker, filename, digests, version="20.1"):
+    body = json.dumps({"releases": {version: [{"filename": filename, "digests": digests}]}})
+
+    @contextmanager
+    def _release(of, context):
+        yield StringIO(body)
+
+    return mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", side_effect=_release)
+
+
+def test_verify_wheel_digest_matches(tmp_path, mocker):
+    wheel = Wheel(tmp_path / "pip-20.1-py3-none-any.whl")
+    wheel.path.write_bytes(b"content")
+    _pypi_release_response(mocker, wheel.name, {"sha256": hashlib.sha256(b"content").hexdigest()})
+
+    verify_wheel_digest(wheel)  # must not raise
+
+
+def test_verify_wheel_digest_mismatch(tmp_path, mocker):
+    wheel = Wheel(tmp_path / "pip-20.1-py3-none-any.whl")
+    wheel.path.write_bytes(b"content")
+    _pypi_release_response(mocker, wheel.name, {"sha256": "0" * 64})
+
+    with pytest.raises(RuntimeError, match=r"has sha256 .* but PyPI reports"):
+        verify_wheel_digest(wheel)
+
+
+@pytest.mark.parametrize(
+    ("filename", "digests", "version"),
+    [
+        pytest.param("setuptools-99.0-py3-none-any.whl", {"sha256": "0" * 64}, "20.1", id="filename_not_in_release"),
+        pytest.param(
+            "pip-20.1-py3-none-any.whl",
+            {"md5": "d41d8cd98f00b204e9800998ecf8427e"},
+            "20.1",
+            id="no_sha256_digest",
+        ),
+        pytest.param("pip-20.1-py3-none-any.whl", {"sha256": "0" * 64}, "19.0", id="version_not_in_releases"),
+    ],
+)
+@pytest.mark.usefixtures("retry_sleep")
+def test_verify_wheel_digest_rejects_when_unverifiable(tmp_path, mocker, filename, digests, version):
+    wheel = Wheel(tmp_path / "pip-20.1-py3-none-any.whl")
+    wheel.path.write_bytes(b"content")
+    _pypi_release_response(mocker, filename, digests, version)
+
+    with pytest.raises(UnverifiedWheelError, match=r"could not obtain its sha256 from PyPI"):
+        verify_wheel_digest(wheel)
+
+
+def test_verify_wheel_digest_rejects_after_retrying_pypi_lookup(tmp_path, mocker, retry_sleep):
+    wheel = Wheel(tmp_path / "pip-20.1-py3-none-any.whl")
+    wheel.path.write_bytes(b"content")
+    mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", side_effect=URLError("offline"))
+
+    with pytest.raises(UnverifiedWheelError, match=r"could not obtain its sha256 from PyPI"):
+        verify_wheel_digest(wheel)
+
+    assert [entry[0] for entry in retry_sleep.call_args_list] == [(1.0,), (2.0,), (4.0,)]
+
+
+@pytest.mark.usefixtures("retry_sleep")
+def test_verify_wheel_digest_recovers_on_retry(tmp_path, mocker):
+    wheel = Wheel(tmp_path / "pip-20.1-py3-none-any.whl")
+    wheel.path.write_bytes(b"content")
+    body = json.dumps({"releases": {"20.1": [{"filename": wheel.name, "digests": {"sha256": "0" * 64}}]}})
+    calls = []
+
+    @contextmanager
+    def _release(of, context):
+        calls.append(context)
+        if len(calls) <= 2:  # the first lookup fails on both the verified and the fallback context
+            raise URLError("offline")
+        yield StringIO(body)
+
+    mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", side_effect=_release)
+
+    with pytest.raises(RuntimeError, match=r"has sha256 .* but PyPI reports 0{64}"):
+        verify_wheel_digest(wheel)
 
 
 def mock_download(mocker, pip_version_remote):
@@ -517,7 +647,7 @@ def test_download_stop_with_embed(tmp_path, mocker, freezer):
     do_update("pip", "3.9", str(wheel.path), str(app_data_outer), [], True)
 
     assert download_wheel.call_count == 3
-    assert url_o.call_count == 2
+    assert url_o.call_count == 1  # no unverified-TLS retry unless VIRTUALENV_PERIODIC_UPDATE_INSECURE is set
 
     assert read_dict.call_count == 1
     assert write.call_count == 1
@@ -540,7 +670,7 @@ def test_download_manual_stop_after_one_download(tmp_path, mocker, freezer):
     do_update("pip", "3.9", str(wheel.path), str(app_data_outer), [], False)
 
     assert download_wheel.call_count == 1
-    assert url_o.call_count == 2
+    assert url_o.call_count == 1  # no unverified-TLS retry unless VIRTUALENV_PERIODIC_UPDATE_INSECURE is set
     assert read_dict.call_count == 1
     assert write.call_count == 1
 
@@ -563,7 +693,7 @@ def test_download_manual_ignores_pre_release(tmp_path, mocker, freezer):
     do_update("pip", "3.9", str(wheel.path), str(app_data_outer), [], False)
 
     assert download_wheel.call_count == 1
-    assert url_o.call_count == 2
+    assert url_o.call_count == 1  # no unverified-TLS retry unless VIRTUALENV_PERIODIC_UPDATE_INSECURE is set
     assert read_dict.call_count == 1
     assert write.call_count == 1
     wrote_json = write.call_args[0][0]

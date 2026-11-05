@@ -1,6 +1,7 @@
 from __future__ import absolute_import, unicode_literals
 
 import os
+import re
 import sys
 from abc import ABCMeta, abstractmethod
 
@@ -11,6 +12,7 @@ except ImportError:  # Python 2
 
 from six import add_metaclass
 
+from virtualenv.util.path import write_file
 from virtualenv.util.six import ensure_text
 
 from .activator import Activator
@@ -58,8 +60,8 @@ class ViaTemplateActivator(Activator):
         for template in templates:
             text = self.instantiate_template(replacements, template, creator)
             dest = to_folder / self.as_name(template)
-            # use write_bytes to avoid platform specific line normalization (\n -> \r\n)
-            dest.write_bytes(text.encode("utf-8"))
+            # write bytes to avoid platform specific line normalization (\n -> \r\n), replacing any existing link
+            write_file(dest, text.encode("utf-8"))
             generated.append(dest)
         return generated
 
@@ -70,10 +72,23 @@ class ViaTemplateActivator(Activator):
         # read content as binary to avoid platform specific line normalization (\n -> \r\n)
         binary = read_binary(self.__module__, str(template))
         text = binary.decode("utf-8", errors="strict")
-        for key, value in replacements.items():
-            value = self._repr_unicode(creator, value)
-            text = text.replace(key, self.quote(value))
-        return text
+        substitutions = self.substitutions(replacements, creator)
+        if not substitutions:
+            return text
+        # one pass over the template, so a placeholder name inside an already quoted value (a path component named
+        # __VIRTUAL_NAME__) stays data instead of being rewritten by a later key from inside the finished literal
+        pattern = re.compile("|".join(re.escape(key) for key in sorted(substitutions, key=len, reverse=True)))
+        return pattern.sub(lambda match: substitutions[match.group()], text)
+
+    def substitutions(self, replacements, creator):
+        """
+        Map each placeholder to the final text that replaces it in the template.
+
+        :param replacements: the raw placeholder values
+        :param creator: the creator of the environment
+        :return: the placeholder to substituted text mapping
+        """
+        return {key: self.quote(self._repr_unicode(creator, value)) for key, value in replacements.items()}
 
     @staticmethod
     def _repr_unicode(creator, value):

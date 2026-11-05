@@ -10,6 +10,7 @@ from tempfile import mkdtemp
 
 from distlib.scripts import ScriptMaker, enquote_executable
 from six import PY3, add_metaclass
+from six.moves import shlex_quote
 
 from virtualenv.util import ConfigParser
 from virtualenv.util.path import Path, safe_delete
@@ -45,6 +46,37 @@ class PipInstall(object):
         logging.debug("generated console scripts %s", " ".join(i.name for i in consoles))
 
     def build_image(self):
+        """
+        Extract the seed wheel into a staging directory, fix up its RECORD file, then move it into place.
+
+        Later runs reuse any image directory they find, so it only appears once the image is complete: a build that
+        fails part way (a full disk, a path that is too long) removes its staging directory, and the next build removes
+        one that a killed process left behind.
+        """
+        image_dir = self._image_dir
+        # beside the installer folder the staging path is exactly as long as the image path, so the Windows path length
+        # limits hit the build the same way they would hit the image
+        staging = image_dir.parent.with_name("{}-{}".format(image_dir.parent.name, image_dir.name))
+        if staging.exists():
+            safe_delete(staging)
+        if not image_dir.parent.exists():
+            image_dir.parent.mkdir(parents=True)
+        staging.mkdir()
+        self._image_dir = staging
+        try:
+            self._populate_image()
+            # keep the short path Windows may have switched the staging directory to, the install reads through it
+            built = self._image_dir.parent / image_dir.parent.name / image_dir.name
+            if built.exists() and not any(True for _ in built.iterdir()):
+                built.rmdir()  # an empty image directory counts as missing, but blocks the rename on Windows
+            os.rename(str(self._image_dir), str(built))
+        except BaseException:
+            safe_delete(self._image_dir)  # the staging directory, through the short path if Windows switched to it
+            raise
+        self._image_dir = built
+        self.__dist_info = None  # it pointed into the staging directory
+
+    def _populate_image(self):
         # 1. first extract the wheel
         logging.debug("build install image for %s to %s", self._wheel.name, self._image_dir)
         with zipfile.ZipFile(str(self._wheel)) as zip_ref:
@@ -153,10 +185,10 @@ class PipInstall(object):
         paths = (p for p in in_folders if p.stem.split("-")[0] == dist_name and p.suffix == ".dist-info" and p.is_dir())
         existing_dist = next(paths, None)
         if existing_dist is not None:
-            self._uninstall_dist(existing_dist)
+            self._uninstall_dist(existing_dist, self._creator.dest)
 
     @staticmethod
-    def _uninstall_dist(dist):
+    def _uninstall_dist(dist, env_dir):
         dist_base = dist.parent
         logging.debug("uninstall existing distribution %s from %s", dist.stem, dist_base)
 
@@ -170,19 +202,33 @@ class PipInstall(object):
             if not any(p in base_dirs for p in path.parents):  # only add if not already added as a base dir
                 paths.add(path)
 
-        for path in sorted(paths):  # actually remove stuff in a stable order
-            if path.exists():
-                if path.is_dir() and not path.is_symlink():
-                    safe_delete(path)
+        # metadata is untrusted: only remove entries inside the environment, never the environment itself or a folder
+        # holding the metadata (a blank top_level.txt line names site-packages)
+        root = env_dir.resolve()
+        metadata_parents = set(dist.resolve().parents)
+        for entry in sorted(paths):  # actually remove stuff in a stable order
+            if entry.exists() or entry.is_symlink():
+                linked = entry.is_symlink()
+                # unlinking the final link leaves its target intact; parent links still affect containment
+                resolved = entry.parent.resolve() / entry.name if linked else entry.resolve()
+                if root not in resolved.parents or resolved in metadata_parents:
+                    logging.warning(
+                        "skip removal of %s listed by %s: not inside environment %s or a parent of the metadata",
+                        entry,
+                        dist.name,
+                        root,
+                    )
+                elif entry.is_dir() and not linked:
+                    safe_delete(entry)
                 else:
-                    path.unlink()
+                    entry.unlink()
 
     def clear(self):
         if self._image_dir.exists():
             safe_delete(self._image_dir)
 
     def has_image(self):
-        return self._image_dir.exists() and next(self._image_dir.iterdir()) is not None
+        return self._image_dir.exists() and next(self._image_dir.iterdir(), None) is not None
 
 
 class ScriptMakerCustom(ScriptMaker):
@@ -194,7 +240,26 @@ class ScriptMakerCustom(ScriptMaker):
         self.version_info = version_info.major, version_info.minor
         self.variants = {"", "X", "X.Y"}
         self._name = name
+        self._raw_executable = ensure_text(str(executable))
+
+    def _build_shebang(self, executable, post_interp):
+        shebang = super(ScriptMakerCustom, self)._build_shebang(executable, post_interp)
+        if os.name != "posix" or len(shebang.split()) == 1:
+            return shebang
+        # distlib only double quotes the interpreter path for the /bin/sh launcher, so the shell would still expand
+        # $(...), backticks and $VAR from the destination path; it also misses tabs when choosing that launcher
+        return shell_shebang(self._raw_executable, post_interp)
 
     def _write_script(self, names, shebang, script_bytes, filenames, ext):
         names.add("{}{}.{}".format(self._name, *self.version_info))
+        for name in names:  # distlib opens the script path directly, so a planted (dangling) link would be followed
+            path = Path(self.target_dir) / ("{}.exe".format(name) if os.name == "nt" else name)
+            if path.is_symlink():
+                path.unlink()
         super(ScriptMakerCustom, self)._write_script(names, shebang, script_bytes, filenames, ext)
+
+
+def shell_shebang(executable, post_interp=b""):
+    # The exec line is read by both sh and Python; double-quoted backslashes survive both readers.
+    quoted = shlex_quote(ensure_text(executable)).replace("\\", "'\"\\\\\"'")
+    return b"#!/bin/sh\n'''exec' " + quoted.encode("utf-8") + post_interp + b' "$0" "$@"\n' + b"' '''\n"

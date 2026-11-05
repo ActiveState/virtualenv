@@ -11,7 +11,7 @@ def-env activate-virtualenv [] {
     let is-windows = ((sys).host.name | str downcase) == 'windows'
     let virtual-env = __VIRTUAL_ENV__
     let bin = __BIN_NAME__
-    let path-sep = '__PATH_SEP__'
+    let path-sep = __PATH_SEP__
     let path-name = if $is-windows {
         if (has-env 'Path') {
             'Path'
@@ -89,4 +89,4 @@ def-env activate-virtualenv [] {
 activate-virtualenv
 
 alias pydoc = python -m pydoc
-alias deactivate = source '__DEACTIVATE_PATH__'
+alias deactivate = source __DEACTIVATE_PATH__

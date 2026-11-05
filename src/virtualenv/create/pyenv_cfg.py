@@ -3,7 +3,9 @@ from __future__ import absolute_import, unicode_literals
 import logging
 from collections import OrderedDict
 
+from virtualenv.util.path import write_file
 from virtualenv.util.six import ensure_text
+from virtualenv.util.text import collapse_line_boundaries
 
 
 class PyEnvCfg(object):
@@ -34,11 +36,13 @@ class PyEnvCfg(object):
         logging.debug("write %s", ensure_text(str(self.path)))
         text = ""
         for key, value in self.content.items():
-            line = "{} = {}".format(key, value)
+            # pyvenv.cfg is line based with no escape syntax: keep every key and value on a single line so a value
+            # (e.g. the --prompt) can never be read back as extra configuration lines
+            line = "{} = {}".format(collapse_line_boundaries(key), collapse_line_boundaries(value))
             logging.debug("\t%s", line)
             text += line
             text += "\n"
-        self.path.write_text(text, encoding="utf-8")
+        write_file(self.path, text.encode("utf-8"))
 
     def refresh(self):
         self.content = self._read_values(self.path)

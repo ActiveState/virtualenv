@@ -7,7 +7,7 @@ from abc import ABCMeta
 from six import add_metaclass
 
 from virtualenv.info import fs_supports_symlink
-from virtualenv.util.path import Path
+from virtualenv.util.path import Path, write_file
 from virtualenv.util.six import ensure_text
 
 from ..creator import Creator, CreatorMeta
@@ -93,10 +93,10 @@ class ViaGlobalRefApi(Creator):
         if text:
             pth = self.purelib / "_virtualenv.pth"
             logging.debug("create virtualenv import hook file %s", ensure_text(str(pth)))
-            pth.write_text("import _virtualenv")
+            write_file(pth, b"import _virtualenv")
             dest_path = self.purelib / "_virtualenv.py"
             logging.debug("create %s", ensure_text(str(dest_path)))
-            dest_path.write_text(text)
+            write_file(dest_path, text.encode("utf-8"))
 
     def env_patch_text(self):
         """Patch the distutils package to not be derailed by its configuration files"""
