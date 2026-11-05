@@ -1,6 +1,6 @@
 from __future__ import absolute_import, unicode_literals
 
-import itertools
+import os
 import sys
 from shutil import copy2
 
@@ -10,6 +10,8 @@ from virtualenv.run import cli_run
 from virtualenv.seed.embed.pip_invoke import PipInvoke
 from virtualenv.seed.wheels.bundle import load_embed_wheel
 from virtualenv.seed.wheels.embed import BUNDLE_FOLDER, BUNDLE_SUPPORT
+from virtualenv.seed.wheels.util import Wheel
+from virtualenv.util.path import Path
 
 
 @pytest.mark.slow
@@ -34,24 +36,22 @@ def test_base_bootstrap_via_pip_invoke(tmp_path, coverage_env, mocker, current_f
         for distribution, with_version in versions.items():
             if distribution == no:
                 continue
-            if with_version == "embed":
-                expected.add(BUNDLE_FOLDER)
-            elif old[distribution] == new[distribution]:
-                expected.add(BUNDLE_FOLDER)
+            if with_version == "embed" or old[distribution] == new[distribution]:
+                expected.add(BUNDLE_SUPPORT[old_ver][distribution])
             else:
-                expected.add(extra_search_dir)
-        expected_list = list(
-            itertools.chain.from_iterable(["--find-links", str(e)] for e in sorted(expected, key=lambda x: str(x))),
-        )
-        found = cmd[-len(expected_list) :] if expected_list else []
-        assert "--no-index" not in cmd
-        cmd.append("--no-index")
-        assert found == expected_list
+                expected.add(new[distribution])
+        # pip must never consult an index, only a private folder holding exactly the selected wheels
+        assert "--no-index" in cmd
+        assert cmd.count("--find-links") == 1
+        folder = Path(cmd[cmd.index("--find-links") + 1])
+        assert folder not in (BUNDLE_FOLDER, extra_search_dir)
+        assert {i.name for i in folder.iterdir()} == expected
         return original(cmd, env)
 
     original = PipInvoke._execute
     run = mocker.patch.object(PipInvoke, "_execute", side_effect=_execute)
-    versions = {"pip": "embed", "setuptools": "bundle", "wheel": new["wheel"].split("-")[1]}
+    # "bundle" with --download would now download (and verify) through virtualenv, so stay offline with local versions
+    versions = {"pip": "embed", "setuptools": "embed", "wheel": new["wheel"].split("-")[1]}
 
     create_cmd = [
         "--seeder",
@@ -89,3 +89,28 @@ def test_base_bootstrap_via_pip_invoke(tmp_path, coverage_env, mocker, current_f
         if key == no:
             continue
         assert locals()[key] in files_post_first_create
+
+
+def test_pip_invoke_installs_only_selected_wheels(tmp_path, mocker):
+    """the pip seeder obtains (and so verifies) downloads itself; pip only sees a private copy of the selected wheels"""
+    selected = {dist: Wheel(BUNDLE_FOLDER / name) for dist, name in BUNDLE_SUPPORT["2.7"].items()}
+    get_wheel = mocker.patch(
+        "virtualenv.seed.embed.pip_invoke.get_wheel",
+        side_effect=lambda distribution, **kwargs: selected[distribution],
+    )
+    seeder = PipInvoke.__new__(PipInvoke)
+    seeder.download = True
+    seeder.extra_search_dir = [BUNDLE_FOLDER]
+    seeder.app_data = None
+    seeder.periodic_update = False
+    seeder.env = {}
+    mocker.patch.object(PipInvoke, "distribution_to_versions", return_value={i: "bundle" for i in selected})
+
+    with seeder.get_pip_install_cmd(tmp_path / "python", "2.7") as cmd:
+        folder = cmd[cmd.index("--find-links") + 1]
+        assert sorted(os.listdir(folder)) == sorted(i.name for i in selected.values())
+        assert "--no-index" in cmd
+        assert cmd.count("--find-links") == 1
+        assert sorted(cmd[-len(selected) :]) == sorted("{}=={}".format(d, w.version) for d, w in selected.items())
+    assert not os.path.exists(folder)
+    assert {c[1]["download"] for c in get_wheel.call_args_list} == {True}

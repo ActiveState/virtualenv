@@ -2,10 +2,13 @@
 from __future__ import absolute_import, unicode_literals
 
 import logging
+import os
+import re
 import sys
 from operator import eq, lt
+from tempfile import mkdtemp
 
-from virtualenv.util.path import Path
+from virtualenv.util.path import Path, safe_delete
 from virtualenv.util.six import ensure_str
 from virtualenv.util.subprocess import Popen, subprocess
 
@@ -62,53 +65,124 @@ def get_wheel(distribution, version, for_py_version, search_dirs, download, app_
 
 
 def download_wheel(distribution, version_spec, for_py_version, search_dirs, app_data, to_folder, env):
+    """
+    Download one wheel into a private staging directory and move it into ``to_folder`` once it checks out.
+
+    :raises CalledProcessError: when ``pip download`` fails.
+    :raises UnverifiedWheelError: when PyPI cannot supply the digest to verify against.
+    :raises RuntimeError: when the staged file is not the requested wheel, its digest differs from PyPI's, or it does
+        not support ``for_py_version``; nothing reaches ``to_folder`` in these cases.
+    """
     to_download = "{}{}".format(distribution, version_spec or "")
     logging.debug("download wheel %s %s to %s", to_download, for_py_version, to_folder)
-    cmd = [
-        sys.executable,
-        "-m",
-        "pip",
-        "download",
-        "--progress-bar",
-        "off",
-        "--disable-pip-version-check",
-        "--only-binary=:all:",
-        "--no-deps",
-        "--python-version",
-        for_py_version,
-        "-d",
-        str(to_folder),
-        to_download,
-    ]
     verify_against_pypi = _uses_default_index(env)
     # pip has no interface in python - must be a new sub-process
     env = pip_wheel_env_run(search_dirs, app_data, env)
-    process = Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    out, err = process.communicate()
-    if process.returncode != 0:
-        kwargs = {"output": out}
-        if sys.version_info < (3, 5):
-            kwargs["output"] += err
-        else:
-            kwargs["stderr"] = err
-        raise subprocess.CalledProcessError(process.returncode, cmd, **kwargs)
-    result = _find_downloaded_wheel(distribution, version_spec, for_py_version, to_folder, out)
-    if result is None:
-        raise RuntimeError("could not find downloaded wheel for {}".format(to_download))
-    logging.debug("downloaded wheel %s", result.name)
-    if verify_against_pypi:
-        verify_wheel_digest(result)
+    _ensure_folder(to_folder)
+    # download into a fresh private folder: pip's output and whatever already sits in to_folder must not decide which
+    # file is accepted, and nothing may land in the reusable cache before it is verified
+    staging = mkdtemp(dir=str(to_folder), prefix="download-")
+    try:
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "download",
+            "--progress-bar",
+            "off",
+            "--disable-pip-version-check",
+            "--only-binary=:all:",
+            "--no-deps",
+            "--python-version",
+            for_py_version,
+            "-d",
+            staging,
+            to_download,
+        ]
+        process = Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        out, err = process.communicate()
+        if process.returncode != 0:
+            kwargs = {"output": out}
+            if sys.version_info < (3, 5):
+                kwargs["output"] += err
+            else:
+                kwargs["stderr"] = err
+            raise subprocess.CalledProcessError(process.returncode, cmd, **kwargs)
+        result = _downloaded_wheel(Path(staging), distribution, version_spec)
+        logging.debug("downloaded wheel %s", result.name)
+        if verify_against_pypi:
+            verify_wheel_digest(result)
+        if not result.support_py(for_py_version):
+            raise RuntimeError("downloaded wheel {} does not support Python {}".format(result.name, for_py_version))
+        destination = to_folder / result.name
+        _replace(result.path, destination)
+        return Wheel(destination)
+    finally:
+        safe_delete(staging)
+
+
+def _ensure_folder(folder):
+    try:
+        os.makedirs(str(folder))
+    except OSError:
+        if not os.path.isdir(str(folder)):
+            raise
+
+
+def _replace(src, dst):
+    if hasattr(os, "replace"):  # pragma: no cover # py3
+        os.replace(str(src), str(dst))
+    else:  # pragma: no cover # py2, os.rename does not overwrite on Windows
+        if sys.platform == "win32" and os.path.lexists(str(dst)):
+            os.unlink(str(dst))
+        os.rename(str(src), str(dst))
+
+
+def _downloaded_wheel(folder, distribution, version_spec):
+    files = list(folder.iterdir())
+    if len(files) != 1 or files[0].is_symlink() or not files[0].is_file():
+        raise RuntimeError("could not find downloaded wheel for {}: expected one archive".format(distribution))
+    result = Wheel.from_path(files[0])
+    if (
+        result is None
+        or _canonicalize_name(result.distribution) != _canonicalize_name(distribution)
+        or (version_spec and not _version_matches(result.version, version_spec))
+    ):
+        raise RuntimeError(
+            "unexpected downloaded wheel {} for {}{}".format(files[0].name, distribution, version_spec or ""),
+        )
     return result
 
 
-def _find_downloaded_wheel(distribution, version_spec, for_py_version, to_folder, out):
-    for line in out.splitlines():
-        line = line.lstrip()
-        for marker in ("Saved ", "File was already downloaded "):
-            if line.startswith(marker):
-                return Wheel(Path(line[len(marker) :]).absolute())
-    # if for some reason the output does not match fallback to latest version with that spec
-    return find_compatible_in_house(distribution, version_spec, for_py_version, to_folder)
+def _canonicalize_name(name):
+    # PEP 503 normalization, as packaging.utils.canonicalize_name (not a runtime dependency here)
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _version_matches(version, version_spec):
+    # only the two forms this module produces: ``==<ver>`` (Version.as_version_spec) and ``<<ver>`` (periodic update)
+    if version_spec.startswith("=="):
+        expected = version_spec[2:]
+        if version == expected:
+            return True
+        return _is_release(version) and _is_release(expected) and _norm(version) == _norm(expected)
+    if version_spec.startswith("<"):
+        try:
+            return Wheel.as_version_tuple(version) < Wheel.as_version_tuple(version_spec[1:])
+        except ValueError:
+            return False
+    raise ValueError(version_spec)
+
+
+def _is_release(version):
+    return re.match(r"^\d+(\.\d+)*$", version) is not None
+
+
+def _norm(version):
+    parts = [int(i) for i in version.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
 def find_compatible_in_house(distribution, version_spec, for_py_version, in_folder):
