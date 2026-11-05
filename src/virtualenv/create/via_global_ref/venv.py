@@ -1,14 +1,17 @@
 from __future__ import absolute_import, unicode_literals
 
 import logging
-from copy import copy
+import os
+from argparse import ArgumentTypeError
 from itertools import chain
 
 from virtualenv.create.via_global_ref.store import handle_store_python
 from virtualenv.discovery.py_info import PythonInfo
 from virtualenv.util.error import ProcessCallFailed
 from virtualenv.util.path import ensure_within
+from virtualenv.util.six import ensure_text
 from virtualenv.util.subprocess import run_cmd
+from virtualenv.util.text import collapse_line_boundaries
 
 from .api import ViaGlobalRefApi, ViaGlobalRefMeta
 from .builtin.pypy.pypy3 import Pypy3Windows
@@ -50,6 +53,22 @@ class Venv(ViaGlobalRefApi):
         super(Venv, self).create()
         self.executables_for_win_pypy_less_v37()
 
+    @classmethod
+    def validate_dest(cls, raw_value):
+        return cls._check_line_boundaries(super(Venv, cls).validate_dest(cls._check_line_boundaries(raw_value)))
+
+    @staticmethod
+    def _check_line_boundaries(value):
+        # stdlib venv writes the destination into pyvenv.cfg without escaping line boundaries.
+        text = ensure_text(value)
+        if collapse_line_boundaries(text) != text:
+            raise ArgumentTypeError(
+                "destination {!r} must not contain a line boundary as venv cannot record it in pyvenv.cfg".format(
+                    text,
+                ),
+            )
+        return value
+
     def executables_for_win_pypy_less_v37(self):
         """
         PyPy <= 3.6 (v7.3.3) for Windows contains only pypy3.exe and pypy3w.exe
@@ -88,10 +107,15 @@ class Venv(ViaGlobalRefApi):
         return cmd
 
     def set_pyenv_cfg(self):
-        # prefer venv options over ours, but keep our extra
-        venv_content = copy(self.pyenv_cfg.refresh())
+        # write the configuration from the selected interpreter and our options only: reading back stdlib venv's
+        # intermediate pyvenv.cfg would let a crafted value (e.g. a destination embedded in its command line)
+        # be reinterpreted as additional keys; the keys stdlib venv contributed are derived from the interpreter instead
         super(Venv, self).set_pyenv_cfg()
-        self.pyenv_cfg.update(venv_content)
+        system_executable = self.interpreter.system_executable or self.interpreter.executable
+        self.pyenv_cfg["home"] = os.path.dirname(os.path.abspath(system_executable))
+        self.pyenv_cfg["version"] = ".".join(str(i) for i in self.interpreter.version_info[:3])
+        if self.interpreter.version_info[:2] >= (3, 11):
+            self.pyenv_cfg["executable"] = os.path.realpath(system_executable)
 
     def __getattribute__(self, item):
         describe = object.__getattribute__(self, "describe")

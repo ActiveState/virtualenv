@@ -426,6 +426,71 @@ def test_creator_replaces_directory_links(tmp_path, creator_name, folder, juncti
     assert (link.resolve(), session.creator.exe.is_file(), list(stored.iterdir())) == (link, True, [])
 
 
+@pytest.mark.skipif("venv" not in CURRENT_CREATORS, reason="stdlib venv is unavailable")
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        pytest.param(char, id=name)
+        for name, char in (
+            ("newline", "\n"),
+            ("return", "\r"),
+            ("vertical-tab", "\v"),
+            ("form-feed", "\f"),
+            ("file-separator", "\x1c"),
+            ("group-separator", "\x1d"),
+            ("record-separator", "\x1e"),
+            ("next-line", "\x85"),
+            ("line-separator", "\u2028"),
+            ("paragraph-separator", "\u2029"),
+        )
+    ],
+)
+def test_venv_creator_rejects_line_boundary(tmp_path, capsys, boundary):
+    destination = os.path.join(ensure_text(str(tmp_path)), "project{}name".format(boundary))
+    with pytest.raises(SystemExit) as context:
+        cli_run([destination, "--creator", "venv", "--no-seed"])
+    assert context.value.code == 2
+    assert "must not contain a line boundary" in capsys.readouterr()[1]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif("venv" not in CURRENT_CREATORS, reason="stdlib venv is unavailable")
+def test_venv_creator_accepts_plain_destination(tmp_path):
+    session = cli_run([str(tmp_path / "environment"), "--creator", "venv", "--no-seed"])
+    assert (session.creator.dest / "pyvenv.cfg").is_file()
+
+
+@pytest.mark.skipif(not CURRENT.has_venv, reason="requires venv")
+@pytest.mark.parametrize("global_packages", [pytest.param(False, id="isolated"), pytest.param(True, id="global")])
+def test_venv_configuration_uses_selected_options(tmp_path, global_packages):
+    args = [str(tmp_path / "env"), "--creator", "venv", "--no-seed"]
+    if global_packages:
+        args.append("--system-site-packages")
+    session = cli_run(args)
+    session.creator.pyenv_cfg.path.write_text(
+        ensure_text("vendor-marker = unused\ninclude-system-site-packages = {}\n".format(str(not global_packages).lower())),
+    )
+    session.creator.set_pyenv_cfg()
+    expected = {"vendor-marker": None, "include-system-site-packages": str(global_packages).lower()}
+    assert {key: session.creator.pyenv_cfg.content.get(key) for key in expected} == expected
+
+
+@pytest.mark.skipif(not CURRENT.has_venv, reason="requires venv")
+def test_venv_configuration_keeps_stdlib_keys(tmp_path):
+    # the configuration is no longer read back from stdlib venv, so the keys it wrote are derived instead
+    session = cli_run([str(tmp_path / "env"), "--creator", "venv", "--no-seed"])
+    content = session.creator.pyenv_cfg.content
+    system_executable = CURRENT.system_executable
+    expected = {
+        "home": os.path.dirname(os.path.abspath(system_executable)),
+        "version": ".".join(str(i) for i in CURRENT.version_info[:3]),
+    }
+    if CURRENT.version_info[:2] >= (3, 11):
+        expected["executable"] = os.path.realpath(system_executable)
+    assert {key: content.get(key) for key in expected} == expected
+    assert PyEnvCfg.from_folder(session.creator.dest).content == content
+
+
 @pytest.mark.skipif(not CURRENT.has_venv, reason="requires interpreter with venv")
 def test_venv_fails_not_inline(tmp_path, capsys, mocker):
     if hasattr(os, "geteuid"):
