@@ -388,6 +388,44 @@ def test_venv_replaces_hard_linked_files(tmp_path, mode):
     ] * len(planted)
 
 
+@pytest.mark.parametrize(
+    "junction",
+    [
+        pytest.param(
+            False,
+            id="symlink",
+            marks=pytest.mark.skipif(not fs_supports_symlink(), reason="symlinks are unavailable"),
+        ),
+        pytest.param(True, id="junction", marks=pytest.mark.skipif(os.name != "nt", reason="Windows junctions")),
+    ],
+)
+@pytest.mark.parametrize(
+    "creator_name",
+    [
+        pytest.param("builtin", id="builtin"),
+        pytest.param(
+            "venv",
+            id="venv",
+            marks=pytest.mark.skipif("venv" not in CURRENT_CREATORS, reason="stdlib venv is unavailable"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("folder", [pytest.param("bin_dir", id="executables"), pytest.param("purelib", id="packages")])
+def test_creator_replaces_directory_links(tmp_path, creator_name, folder, junction):
+    session = session_via_cli([str(tmp_path / "env"), "--creator", creator_name, "--no-seed"])
+    session.creator.dest.mkdir()
+    stored = session.creator.dest / "stored"
+    stored.mkdir()
+    link = session.creator.dest / getattr(session.creator, folder).relative_to(session.creator.dest).parts[0]
+    if junction:
+        subprocess.check_call(["cmd", "/c", "mklink", "/J", str(link), str(stored)])
+    else:
+        link.symlink_to(stored, target_is_directory=True)
+    with session:
+        session.run()
+    assert (link.resolve(), session.creator.exe.is_file(), list(stored.iterdir())) == (link, True, [])
+
+
 @pytest.mark.skipif(not CURRENT.has_venv, reason="requires interpreter with venv")
 def test_venv_fails_not_inline(tmp_path, capsys, mocker):
     if hasattr(os, "geteuid"):

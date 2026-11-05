@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from virtualenv.info import IS_WIN, PY2
-from virtualenv.util.path import Path, copy, write_file
+from virtualenv.util.path import Path, copy, ensure_within, write_file
 from virtualenv.util.subprocess import run_cmd
 
 
@@ -99,3 +99,59 @@ def test_write_file_replaces_link(tmp_path, existing):
         b"generated",
         b"original" if existing else False,
     )
+
+
+@pytest.mark.parametrize("existing", [pytest.param(False, id="new"), pytest.param(True, id="existing")])
+def test_environment_directories_create_nested_path(tmp_path, existing):
+    root = Path(str(tmp_path))
+    folder = root / "env" / "lib" / "python"
+    if existing:
+        folder.mkdir(parents=True)
+    ensure_within(root / "env", folder)
+    assert folder.is_dir()
+
+
+def test_environment_directories_reject_regular_file(tmp_path):
+    root = Path(str(tmp_path))
+    folder = root / "file"
+    folder.write_bytes(b"")
+    with pytest.raises(OSError, match="not a real directory"):
+        ensure_within(root, folder)
+
+
+def test_environment_directories_reject_parent_components(tmp_path):
+    root = Path(str(tmp_path))
+    with pytest.raises(ValueError, match="must remain inside"):
+        ensure_within(root, root / ".." / "folder")
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or IS_WIN, reason="symlinks are unavailable")
+@pytest.mark.parametrize(
+    "existing",
+    [pytest.param(False, id="missing-target"), pytest.param(True, id="existing-target")],
+)
+def test_environment_directories_remove_links(tmp_path, caplog, existing):
+    root = Path(str(tmp_path))
+    target = root / "stored"
+    if existing:
+        target.mkdir()
+    link = root / "link"
+    link.symlink_to(target, target_is_directory=True)
+    ensure_within(root, link / "nested")
+    assert (
+        link.is_symlink(),
+        link.exists(),
+        target.exists(),
+        "replace environment directory link {}".format(link) in caplog.text,
+    ) == (False, True, existing, True)
+
+
+@pytest.mark.skipif(os.name != "nt" or sys.version_info < (3, 8), reason="Windows junctions")
+def test_environment_directories_report_replaced_junction(tmp_path, caplog):
+    root = Path(str(tmp_path))
+    target = root / "stored"
+    target.mkdir()
+    link = root / "link"
+    subprocess.check_call(["cmd", "/c", "mklink", "/J", str(link), str(target)])
+    ensure_within(root, link)
+    assert (link.resolve(), "replace environment directory junction {}".format(link) in caplog.text) == (link, True)
