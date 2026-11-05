@@ -153,7 +153,7 @@ def test_prompt_renders_name_literally(prompt_after_activate, prompt, compatibil
             "(x$(touch PWNED)y) __END__",
             id="promptvars-disabled-posix",
         ),
-        pytest.param("", "set -u; unset VIRTUAL_ENV_PROMPT", "() __END__", id="unset-with-nounset"),
+        pytest.param("", "set -u; unset VIRTUAL_ENV_PROMPT", "(x$(touch PWNED)y) __END__", id="unset-with-nounset"),
     ],
 )
 def test_bash_prompt_options(tmp_path, current_fastest, before, after, expected):
@@ -182,3 +182,46 @@ def test_bash_activate_sources_under_dash(tmp_path, current_fastest):
     ]
     code, out, err = _run(cmd)
     assert (code, out) == (0, "{}|base |env".format(dest)), err
+
+
+@pytest.mark.skipif(IS_WIN or find_executable("bash") is None, reason="requires POSIX bash")
+@pytest.mark.parametrize(
+    "after",
+    [
+        pytest.param('shopt -s promptvars; printf "%s\\n" "${PS1@P}"', id="promptvars-enabled-later"),
+        pytest.param("bash --noprofile --norc -i <<<exit", id="child-bash"),
+        pytest.param("dash -i <<<exit", id="child-dash"),
+    ],
+)
+def test_bash_prompt_escaped_for_every_promptvars_state(tmp_path, current_fastest, after):
+    """GHSA-cx6f-vjhg-g3cc: promptvars off at activation must not leave a live prompt for later draws or child shells."""
+    if after.startswith("dash") and find_executable("dash") is None:
+        pytest.skip("dash is not installed")
+    if _bash_version() < 404:
+        pytest.skip("${PS1@P} needs bash 4.4 or later")
+    bin_dir = _create(os.path.join(ensure_text(str(tmp_path)), "env"), "x$(touch PWNED)y`touch PWNED2`", current_fastest)
+    activate = BashActivator.quote(os.path.join(bin_dir, "activate"))
+    script = "shopt -u promptvars\nPS1=__END__\n. {}\n{}\nexit\n".format(activate, after)
+    env = os.environ.copy()
+    env.pop(str("VIRTUAL_ENV_DISABLE_PROMPT"), None)
+    _, out, err = _run(["bash", "--noprofile", "--norc", "-i"], cwd=ensure_text(str(tmp_path)), env=env, stdin=script)
+    assert not (tmp_path / "PWNED").exists(), (out, err)
+    assert not (tmp_path / "PWNED2").exists(), (out, err)
+    assert "x$(touch PWNED)y`touch PWNED2`" in out + err, (out, err)
+
+
+@pytest.mark.skipif(IS_WIN or find_executable("bash") is None, reason="requires POSIX bash")
+@pytest.mark.parametrize("setup", [pytest.param("", id="default"), pytest.param("BASH_COMPAT=42; ", id="compat42")])
+def test_bash_prompt_stored_form(tmp_path, current_fastest, setup):
+    bin_dir = _create(os.path.join(ensure_text(str(tmp_path)), "env"), "a\\b$c`d", current_fastest)
+    cmd = ["bash", "--norc", "--noprofile", "-c", setup + 'PS1=__END__; . "$1"; printf "%s" "$PS1"', "test"]
+    code, out, err = _run(cmd + [os.path.join(bin_dir, "activate")])
+    assert (code, out) == (0, "(a\\\\\\\\b\\$c\\`d) __END__"), err
+
+
+@pytest.mark.skipif(IS_WIN or find_executable("zsh") is None, reason="requires zsh")
+def test_zsh_deactivate_restores_psvar(tmp_path, current_fastest):
+    bin_dir = _create(os.path.join(ensure_text(str(tmp_path)), "env"), "plain", current_fastest)
+    script = 'psvar=(a b); . "$1"; print -r -- "$psvar[9]"; deactivate; print -r -- "${(j:,:)psvar}"'
+    code, out, err = _run(["zsh", "-f", "-c", script, "zsh", os.path.join(bin_dir, "activate")])
+    assert (code, out) == (0, "plain\na,b,,,,,,,\n"), err
