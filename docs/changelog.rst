@@ -9,51 +9,58 @@ v20.15.1.post3 (2026-11-04)
 ---------------------------
 
 ActiveState security release on the 20.15.1.x line (the last virtualenv line that runs on Python 2.7). Backports
-the fixes for the advisories published against virtualenv up to 21.14.9; each fix is a Python 2.7-compatible
-backport of the upstream change with a regression test.
+the fixes for the advisories published against virtualenv up to 21.14.13; each fix is a Python 2.7-compatible
+backport of the upstream change with a regression test. Three advisories whose published ranges exclude 20.15.1
+(GHSA-8rjx-v5ww-45pp, GHSA-cx6f-vjhg-g3cc, GHSA-4f8h-vr72-p32c) reach this line's code and are fixed as well.
 
 Security - 20.15.1.post3
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE             | Advisory            | Status                                                                                          |
-+=================+=====================+=================================================================================================+
-| CVE-2026-102930 | GHSA-94p9-xgh2-xp45 | Patched - downloaded seed wheels verified against PyPI's sha256 (fail closed)                   |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-102938 | GHSA-9h9j-4vrj-gf7g | Patched - pyvenv.cfg keys and values kept on one line                                           |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-102925 | GHSA-p58f-9548-mpm2 | Not affected - the two vulnerable template sites do not exist in 20.15.1; regression test added |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-102937 | GHSA-x78j-v8h9-3j2q | Patched - batch activator escapes cmd.exe operators; refuses & in the destination               |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113726 | GHSA-5vjq-rrrf-7h2q | Patched - zsh PROMPT_SUBST cannot expand the prompt text                                        |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113732 | GHSA-c947-3pg5-gm8q | Patched - fish quoting escapes backslash and quote                                              |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113725 | GHSA-vxj4-q4g9-crj7 | Patched - bash prompt with a backslash before $ stays literal                                   |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113723 | GHSA-6w3r-xr62-4xcp | Patched - bash prompt literal under BASH_COMPAT / promptvars / posix modes                      |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113718 | GHSA-394h-qwmc-48pf | Not affected - 20.15.1 has no xonsh activator (removed in 20.7.0)                               |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113724 | GHSA-43mp-35q3-x3fq | Not affected - safe_delete uses rmtree(ignore_errors=True), so the chmod handler never runs     |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113714 | GHSA-494p-63j8-28p3 | Patched - wheels downloaded to private staging and verified before reaching the cache           |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113721 | GHSA-558c-9hv2-4prj | Patched - generated files replace links instead of writing through them                         |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113722 | GHSA-c978-59m8-c77v | Patched - POSIX console launchers single-quote the interpreter path                             |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113716 | GHSA-cw65-gx24-rc82 | Patched - linked bin/lib directories replaced with real directories                             |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113717 | GHSA-cx28-75q4-x26q | Patched - pip seeder installs only verified wheels with --no-index                              |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113720 | GHSA-fc2g-4w5p-6whm | Patched - copied seed files get the current umask, not cached modes                             |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113719 | GHSA-hhxq-47xx-j5xx | Patched - seed metadata cleanup contained to the environment                                    |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
-| CVE-2026-113715 | GHSA-qmx5-4p3x-wvqf | Patched - venv creator no longer reads back stdlib pyvenv.cfg; line breaks in dest rejected     |
-+-----------------+---------------------+-------------------------------------------------------------------------------------------------+
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE             | Advisory            | Status                                                                                                |
++=================+=====================+=======================================================================================================+
+| CVE-2026-102930 | GHSA-94p9-xgh2-xp45 | Patched - downloaded seed wheels verified against PyPI's sha256 (fail closed)                         |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-102938 | GHSA-9h9j-4vrj-gf7g | Patched - pyvenv.cfg keys and values kept on one line                                                 |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-102925 | GHSA-p58f-9548-mpm2 | Not affected - the two vulnerable template sites do not exist in 20.15.1; regression test added       |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-102937 | GHSA-x78j-v8h9-3j2q | Patched - batch activator escapes cmd.exe operators; refuses & in the destination                     |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113726 | GHSA-5vjq-rrrf-7h2q | Patched - zsh PROMPT_SUBST cannot expand the prompt text                                              |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113732 | GHSA-c947-3pg5-gm8q | Patched - fish quoting escapes backslash and quote                                                    |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113725 | GHSA-vxj4-q4g9-crj7 | Patched - bash prompt with a backslash before $ stays literal                                         |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113723 | GHSA-6w3r-xr62-4xcp | Patched - bash prompt literal under BASH_COMPAT / promptvars / posix modes                            |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113718 | GHSA-394h-qwmc-48pf | Not affected - 20.15.1 has no xonsh activator (removed in 20.7.0)                                     |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113724 | GHSA-43mp-35q3-x3fq | Not affected - safe_delete uses rmtree(ignore_errors=True), so the chmod handler never runs           |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113714 | GHSA-494p-63j8-28p3 | Patched - wheels downloaded to private staging and verified before reaching the cache                 |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113721 | GHSA-558c-9hv2-4prj | Patched - generated files replace links instead of writing through them                               |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113722 | GHSA-c978-59m8-c77v | Patched - POSIX console launchers single-quote the interpreter path                                   |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113716 | GHSA-cw65-gx24-rc82 | Patched - linked bin/lib directories replaced with real directories                                   |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113717 | GHSA-cx28-75q4-x26q | Patched - pip seeder installs only verified wheels with --no-index                                    |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113720 | GHSA-fc2g-4w5p-6whm | Patched - copied seed files get the current umask, not cached modes                                   |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113719 | GHSA-hhxq-47xx-j5xx | Patched - seed metadata cleanup contained to the environment                                          |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113715 | GHSA-qmx5-4p3x-wvqf | Patched - venv creator no longer reads back stdlib pyvenv.cfg; line breaks in dest rejected           |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113776 | GHSA-8rjx-v5ww-45pp | Patched - activation placeholders substituted in one pass so a placeholder name in a path stays data  |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-115586 | GHSA-cx6f-vjhg-g3cc | Patched - bash prompt escaped for every promptvars state; zsh reads it from psvar                     |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
+| CVE-2026-113713 | GHSA-4f8h-vr72-p32c | Patched - temporary app-data seeds by copy; env var / config symlink_app_data no longer links into it |
++-----------------+---------------------+-------------------------------------------------------------------------------------------------------+
 
 Bugfixes - 20.15.1.post3
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -66,6 +73,9 @@ Bugfixes - 20.15.1.post3
   manager (every lookup used to fail there).
 - The pip seeder installs the selected wheels with ``--no-deps``, like the app-data seeder, so a newer downloaded
   ``wheel`` that depends on ``packaging`` no longer breaks ``--seeder pip --download``.
+- Seed wheel images are built in a staging directory and moved into the app-data cache only when complete, so a
+  failed or interrupted build can no longer leave a partial image that later environments are seeded from; an empty
+  image directory no longer crashes seeding (upstream #3487).
 - ``test_batch.py`` and ``test_powershell.py`` no longer use f-strings, so they import on Python 2.
 - The version is pinned in ``setup.py`` (``SETUPTOOLS_SCM_PRETEND_VERSION`` default) so every build of this line
   reports ``20.15.1.post3``.
