@@ -274,8 +274,13 @@ def test_console_script_preserves_interpreter_path(tmp_path, current_fastest, na
     work = tmp_path / "work"
     work.mkdir()
     destination = os.path.join(ensure_text(str(tmp_path)), name, "env")
-    cli_run(
+    # create in a fresh interpreter: tests/unit/create/.../testing/path.py sets a "\\" altsep on the shared POSIX path
+    # flavour at import time, which would turn the backslash of the "backslash" case into a separator in-process
+    subprocess.check_call(
         [
+            sys.executable,
+            "-m",
+            "virtualenv",
             destination,
             "--seeder",
             seeder,
